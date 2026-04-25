@@ -8,7 +8,6 @@ from pathlib import Path
 
 import click
 import requests
-
 from llm import hookimpl
 
 GITHUB_REPO = "ggml-org/llama.cpp"
