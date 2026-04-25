@@ -1,0 +1,194 @@
+"""Model download and management from Hugging Face."""
+
+import contextlib
+import shutil
+from pathlib import Path
+
+from huggingface_hub import hf_hub_download, list_repo_files
+
+from .config import get_hf_endpoint, get_models_dir
+from .db import add_model, get_model, list_models, remove_model
+
+# Mapping of short Ollama-style names to HuggingFace repo IDs that host GGUF files
+_SHORT_NAME_MAP: dict[str, str] = {
+    "gemma3": "unsloth/gemma-3-1b-it-GGUF",
+    "gemma3:270m": "unsloth/gemma-3-270m-it-GGUF",
+    "gemma3:1b": "unsloth/gemma-3-1b-it-GGUF",
+    "gemma3:4b": "unsloth/gemma-3-4b-it-GGUF",
+    "gemma3:12b": "unsloth/gemma-3-12b-it-GGUF",
+    "gemma3:27b": "unsloth/gemma-3-27b-it-GGUF",
+    "llama3.2": "meta-llama/Llama-3.2-1B-Instruct-GGUF",
+    "llama3.2:1b": "meta-llama/Llama-3.2-1B-Instruct-GGUF",
+    "llama3.2:3b": "meta-llama/Llama-3.2-3B-Instruct-GGUF",
+    "qwen3": "Qwen/Qwen3-0.6B-GGUF",
+    "qwen3:0.6b": "Qwen/Qwen3-0.6B-GGUF",
+    "qwen3:1.7b": "Qwen/Qwen3-1.7B-GGUF",
+    "qwen3:4b": "Qwen/Qwen3-4B-GGUF",
+    "qwen3:8b": "Qwen/Qwen3-8B-GGUF",
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
+    "mistral:7b": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
+    "phi3": "microsoft/Phi-3-mini-4k-instruct-gguf",
+    "phi3:3.8b": "microsoft/Phi-3-mini-4k-instruct-gguf",
+    "deepseek-r1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
+    "deepseek-r1:1.5b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
+    "deepseek-r1:7b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+}
+
+
+def _parse_model_name(name: str) -> tuple[str, str, str | None]:
+    """Parse a model name like 'namespace/model:Q4_K_M' into parts.
+
+    Supports:
+      - Full HF names: 'TheBloke/LLaMA2-7B-Chat:Q4_K_M'
+      - Short names: 'gemma3', 'gemma3:270m', 'llama3.2:1b'
+
+    Returns (repo_id, display_name, quantization).
+    """
+    if ":" in name:
+        base, quant = name.rsplit(":", 1)
+    else:
+        base = name
+        quant = None
+
+    # Check short name map first (with and without quant tag)
+    lookup = name if name in _SHORT_NAME_MAP else base
+    if lookup in _SHORT_NAME_MAP:
+        repo_id = _SHORT_NAME_MAP[lookup]
+        return repo_id, base, quant
+
+    parts = base.split("/")
+    if len(parts) < 2:
+        raise ValueError(
+            f"Model name must be in 'namespace/model' format or a known short name, got: {name}. "
+            f"Available short names: {', '.join(sorted(_SHORT_NAME_MAP))}"
+        )
+
+    return base, base, quant
+
+
+def _find_gguf_file(repo_id: str, quantization: str | None = None) -> str:
+    """Find a GGUF file in a HuggingFace repo.
+
+    If quantization is specified (e.g. 'Q4_K_M'), look for a file containing it.
+    Otherwise, prefer Q4_K_M or fall back to the first GGUF file found.
+    """
+    endpoint = get_hf_endpoint()
+    files = list_repo_files(repo_id, endpoint=endpoint)
+    gguf_files = [f for f in files if f.endswith(".gguf")]
+
+    if not gguf_files:
+        raise ValueError(f"No GGUF files found in repo '{repo_id}'")
+
+    if quantization:
+        matches = [f for f in gguf_files if quantization.lower() in f.lower()]
+        if matches:
+            return matches[0]
+        # quantization tag didn't match a filename — fall through to default selection
+        # (e.g. size tags like '270m' route to the right repo but aren't in filenames)
+
+    # Default: prefer Q4_K_M
+    preferred = [f for f in gguf_files if "Q4_K_M" in f]
+    if preferred:
+        return preferred[0]
+
+    return gguf_files[0]
+
+
+def pull_model(name: str) -> None:
+    """Download a GGUF model from Hugging Face."""
+    repo_id, display_name, quantization = _parse_model_name(name)
+
+    # Check if already downloaded
+    existing = get_model(display_name)
+    if existing:
+        print(f"Model '{display_name}' already exists at {existing['path']}")
+        return
+
+    filename = _find_gguf_file(repo_id, quantization)
+
+    print(f"Pulling {repo_id} ({filename})...")
+
+    # Download to cache, then copy to our models dir
+    endpoint = get_hf_endpoint()
+    cached_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        endpoint=endpoint,
+    )
+
+    models_dir = get_models_dir()
+    # Create a namespace subdir to avoid collisions
+    model_subdir = models_dir / repo_id.replace("/", "--")
+    model_subdir.mkdir(parents=True, exist_ok=True)
+    dest_path = model_subdir / filename
+    shutil.copy2(cached_path, dest_path)
+
+    size_bytes = dest_path.stat().st_size
+    add_model(
+        name=display_name,
+        repo_id=repo_id,
+        filename=filename,
+        path=str(dest_path),
+        quantization=quantization,
+        size_bytes=size_bytes,
+    )
+
+    print(f"Success! Model saved to {dest_path}")
+
+
+def remove_model_and_file(name: str) -> None:
+    """Remove a model from the database and delete its file."""
+    model = get_model(name)
+    if not model:
+        print(f"Model '{name}' not found.")
+        return
+
+    # Delete the file
+    model_path = Path(model["path"])
+    if model_path.exists():
+        model_path.unlink()
+    # Clean up empty parent dirs
+    with contextlib.suppress(OSError):
+        model_path.parent.rmdir()
+
+    remove_model(name)
+    print(f"Deleted model '{name}'.")
+
+
+def list_downloaded_models() -> None:
+    """Print a table of downloaded models."""
+    models = list_models()
+    if not models:
+        print("No models downloaded yet. Use 'llamacpp pull <model>' to download one.")
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    table = Table(title="Downloaded Models")
+    table.add_column("NAME", style="cyan")
+    table.add_column("QUANTIZATION", style="green")
+    table.add_column("SIZE", style="yellow")
+    table.add_column("MODIFIED", style="dim")
+
+    for m in models:
+        size_str = _format_size(m["size_bytes"]) if m["size_bytes"] else "unknown"
+        table.add_row(
+            m["name"],
+            m["quantization"] or "-",
+            size_str,
+            m["downloaded_at"],
+        )
+
+    console.print(table)
+
+
+def _format_size(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "unknown"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} PB"

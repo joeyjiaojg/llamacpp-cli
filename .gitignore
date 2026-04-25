@@ -1,0 +1,5 @@
+.status.md
+.venv
+build
+*.pyc
+__pycache__
