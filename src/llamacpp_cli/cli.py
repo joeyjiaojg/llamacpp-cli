@@ -60,7 +60,8 @@ def run(
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="Internal llama-server port (auto-managed).")
 @click.option("--args", "extra_args", multiple=True, help="Extra args passed to llama-server.")
-def serve(host: str, port: int, server_port: int, extra_args: tuple[str, ...]) -> None:
+@click.option("--startup-timeout", default=120.0, type=float, show_default=True, help="Seconds to wait for llama-server to become ready.")
+def serve(host: str, port: int, server_port: int, extra_args: tuple[str, ...], startup_timeout: float) -> None:
     """Start the llama.cpp server (auto-loads models on demand like Ollama)."""
     from .installer import ensure_llamacpp
     from .proxy import run_proxy
@@ -72,6 +73,7 @@ def serve(host: str, port: int, server_port: int, extra_args: tuple[str, ...]) -
         port=port,
         server_port=server_port,
         extra_args=list(extra_args) or None,
+        startup_timeout=startup_timeout,
     )
 
 

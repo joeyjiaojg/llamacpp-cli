@@ -36,6 +36,7 @@ class ProxyState:
     ready_event: asyncio.Event = field(default_factory=asyncio.Event)
     server_port: int = 8081
     extra_args: list[str] = field(default_factory=list)
+    startup_timeout: float = 120.0
     # Persistent HTTP client — must outlive individual StreamingResponse bodies.
     http_client: httpx.AsyncClient = field(default_factory=lambda: httpx.AsyncClient(timeout=None))
 
@@ -99,7 +100,7 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
         # Wait for /health to return 200.
         health_url = f"http://127.0.0.1:{state.server_port}/health"
         try:
-            await wait_until_ready(health_url, timeout=120.0)
+            await wait_until_ready(health_url, timeout=state.startup_timeout)
         except TimeoutError:
             _stop_proc(state.server_proc)
             state.server_proc = None
@@ -211,6 +212,7 @@ def run_proxy(
     port: int = 8080,
     server_port: int = 8081,
     extra_args: list[str] | None = None,
+    startup_timeout: float = 120.0,
 ) -> None:
     """Start the proxy in the foreground (blocking). Ctrl+C shuts everything down."""
     import uvicorn
@@ -224,7 +226,7 @@ def run_proxy(
     else:
         print("[proxy] No models downloaded yet. Use 'llamacpp pull <model>' to add one.")
 
-    state = ProxyState(server_port=server_port, extra_args=extra_args or [])
+    state = ProxyState(server_port=server_port, extra_args=extra_args or [], startup_timeout=startup_timeout)
     app = create_app(state, default_model=default_model)
 
     print(f"llamacpp proxy listening on {host}:{port} (backend on 127.0.0.1:{server_port})")
