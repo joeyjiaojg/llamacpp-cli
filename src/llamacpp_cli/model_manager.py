@@ -144,6 +144,10 @@ def _download_resumable(url: str, dest: Path, max_retries: int = 10) -> None:
                 print(f"Resuming from {resumed_at / 1024**3:.1f} GB...")
 
             with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=60, verify=_ssl_verify()) as resp:
+                if resp.status_code == 416:
+                    # Range not satisfiable: file is already fully downloaded
+                    print()
+                    return
                 resp.raise_for_status()
 
                 total = None
