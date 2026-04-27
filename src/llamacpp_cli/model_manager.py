@@ -4,7 +4,7 @@ import contextlib
 import shutil
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import HfApi, hf_hub_download
 
 from .config import get_hf_endpoint, get_models_dir
 from .db import add_model, get_model, list_models, remove_model
@@ -99,8 +99,8 @@ def _find_gguf_file(repo_id: str, quantization: str | None = None) -> str:
     If quantization is specified (e.g. 'Q4_K_M'), look for a file containing it.
     Otherwise, prefer Q4_K_M or fall back to the first GGUF file found.
     """
-    endpoint = get_hf_endpoint()
-    files = list_repo_files(repo_id, endpoint=endpoint)
+    api = HfApi(endpoint=get_hf_endpoint())
+    files = api.list_repo_files(repo_id)
     gguf_files = [f for f in files if f.endswith(".gguf")]
 
     if not gguf_files:
@@ -136,11 +136,10 @@ def pull_model(name: str) -> None:
     print(f"Pulling {repo_id} ({filename})...")
 
     # Download to cache, then copy to our models dir
-    endpoint = get_hf_endpoint()
     cached_path = hf_hub_download(
         repo_id=repo_id,
         filename=filename,
-        endpoint=endpoint,
+        endpoint=get_hf_endpoint(),
     )
 
     models_dir = get_models_dir()
