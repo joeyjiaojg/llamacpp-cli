@@ -56,9 +56,16 @@ def remove_model(name: str) -> bool:
 
 
 def get_model(name: str) -> dict | None:
-    """Look up a model by name. Returns dict or None."""
+    """Look up a model by name, filename, or path suffix. Returns dict or None."""
     conn = _connect()
+    # Try exact name match first.
     row = conn.execute("SELECT * FROM models WHERE name = ?", (name,)).fetchone()
+    if not row:
+        # Fall back: match by filename or the tail of the stored path.
+        row = conn.execute(
+            "SELECT * FROM models WHERE filename = ? OR path LIKE ?",
+            (name, f"%{name}"),
+        ).fetchone()
     conn.close()
     return dict(row) if row else None
 
