@@ -1,14 +1,32 @@
 """Auto-install llama.cpp binaries if not found."""
 
+import os
 import platform
 import tarfile
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 
 import requests
+import urllib3
 
 from .config import get_bin_dir
+
+# Allow disabling SSL verification via env var (useful in environments with
+# self-signed or missing CA certificates).
+_SSL_VERIFY: bool | str = os.environ.get("LLAMACPP_SSL_VERIFY", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+if not _SSL_VERIFY:
+    warnings.warn(
+        "SSL verification disabled via LLAMACPP_SSL_VERIFY. "
+        "Downloads are NOT verified.",
+        stacklevel=1,
+    )
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # llama.cpp GitHub release URLs
 _GITHUB_REPO = "ggml-org/llama.cpp"
@@ -69,7 +87,7 @@ def install_llamacpp() -> bool:
     print(f"Fetching latest llama.cpp release for {system} {machine}...")
 
     try:
-        resp = requests.get(_RELEASE_API, timeout=15)
+        resp = requests.get(_RELEASE_API, timeout=15, verify=_SSL_VERIFY)
         resp.raise_for_status()
         release = resp.json()
     except requests.RequestException as e:
@@ -88,7 +106,7 @@ def install_llamacpp() -> bool:
     print(f"Downloading {filename}...")
 
     try:
-        resp = requests.get(download_url, timeout=120, stream=True)
+        resp = requests.get(download_url, timeout=120, stream=True, verify=_SSL_VERIFY)
         resp.raise_for_status()
     except requests.RequestException as e:
         print(f"Error downloading: {e}")

@@ -1,8 +1,16 @@
 """Search Hugging Face for GGUF models."""
 
+import os
+
 import requests
 
 from .config import get_hf_endpoint
+
+_SSL_VERIFY: bool | str = os.environ.get("LLAMACPP_SSL_VERIFY", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
 
 def search_models(query: str, limit: int = 20) -> None:
@@ -16,7 +24,7 @@ def search_models(query: str, limit: int = 20) -> None:
     }
 
     try:
-        resp = requests.get(f"{api_base}/models", params=params, timeout=15)
+        resp = requests.get(f"{api_base}/models", params=params, timeout=15, verify=_SSL_VERIFY)
         resp.raise_for_status()
     except requests.RequestException as e:
         print(f"Error searching Hugging Face: {e}")
