@@ -1,7 +1,5 @@
 """Tests for config module."""
 
-
-
 from llamacpp_cli.config import get_base_dir, get_db_path, get_models_dir
 
 

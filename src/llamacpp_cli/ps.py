@@ -1,7 +1,6 @@
 """Show running llama.cpp processes."""
 
 
-
 def _find_llamacpp_processes() -> list[dict]:
     """Find running llama-server and llama-cli processes."""
     import subprocess
@@ -14,20 +13,22 @@ def _find_llamacpp_processes() -> list[dict]:
             text=True,
             timeout=5,
         )
+        llama_comms = ("llama-server", "llama-cli")
         for line in result.stdout.strip().splitlines()[1:]:
             parts = line.split(None, 4)
             if len(parts) < 5:
                 continue
             pid, ppid, etime, comm, args = parts
-            llama_comms = ("llama-server", "llama-cli")
-        if comm in llama_comms or any(c in args for c in llama_comms):
-                procs.append({
-                    "pid": int(pid),
-                    "ppid": int(ppid),
-                    "etime": etime,
-                    "comm": comm,
-                    "args": args,
-                })
+            if comm in llama_comms or any(c in args for c in llama_comms):
+                procs.append(
+                    {
+                        "pid": int(pid),
+                        "ppid": int(ppid),
+                        "etime": etime,
+                        "comm": comm,
+                        "args": args,
+                    }
+                )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 

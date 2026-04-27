@@ -1,14 +1,29 @@
 """LLM plugin for updating llama.cpp binary."""
 
+import os
 import platform
 import tarfile
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 
 import click
 import requests
+import urllib3
 from llm import hookimpl
+
+_SSL_VERIFY: bool | str = os.environ.get("LLAMACPP_SSL_VERIFY", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+if not _SSL_VERIFY:
+    warnings.warn(
+        "SSL verification disabled via LLAMACPP_SSL_VERIFY.",
+        stacklevel=1,
+    )
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 GITHUB_REPO = "ggml-org/llama.cpp"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -43,6 +58,7 @@ def _find_release_asset(assets, pattern):
 
 def _get_bin_dir():
     import os
+
     base = os.path.expanduser("~/.llamacpp")
     return Path(base) / "bin"
 
@@ -61,7 +77,7 @@ def update_llamacpp():
 
     click.echo(f"Fetching latest llama.cpp release for {system} {machine}...")
 
-    resp = requests.get(RELEASE_API, timeout=15)
+    resp = requests.get(RELEASE_API, timeout=15, verify=_SSL_VERIFY)
     resp.raise_for_status()
     release = resp.json()
 
@@ -75,7 +91,7 @@ def update_llamacpp():
 
     click.echo(f"Downloading {filename}...")
 
-    resp = requests.get(download_url, timeout=120, stream=True)
+    resp = requests.get(download_url, timeout=120, stream=True, verify=_SSL_VERIFY)
     resp.raise_for_status()
 
     with tempfile.TemporaryDirectory() as tmp_dir:

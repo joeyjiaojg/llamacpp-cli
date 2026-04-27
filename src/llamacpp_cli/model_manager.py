@@ -1,10 +1,13 @@
 """Model download and management from Hugging Face."""
 
 import contextlib
-import shutil
+import os
+import re
+import time
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download, list_repo_files
+import httpx
+from huggingface_hub import HfApi
 
 from .config import get_hf_endpoint, get_models_dir
 from .db import add_model, get_model, list_models, remove_model
@@ -25,6 +28,8 @@ _SHORT_NAME_MAP: dict[str, str] = {
     "qwen3:1.7b": "Qwen/Qwen3-1.7B-GGUF",
     "qwen3:4b": "Qwen/Qwen3-4B-GGUF",
     "qwen3:8b": "Qwen/Qwen3-8B-GGUF",
+    "qwen3-coder": "Qwen/Qwen3-Coder-480B-A35B-GGUF",
+    "qwen3-coder:30b-a3b": "Qwen/Qwen3-Coder-30B-A3B-GGUF",
     "mistral": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
     "mistral:7b": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
     "phi3": "microsoft/Phi-3-mini-4k-instruct-gguf",
@@ -40,41 +45,79 @@ def _parse_model_name(name: str) -> tuple[str, str, str | None]:
 
     Supports:
       - Full HF names: 'TheBloke/LLaMA2-7B-Chat:Q4_K_M'
-      - Short names: 'gemma3', 'gemma3:270m', 'llama3.2:1b'
+      - Short names with optional size+quant: 'gemma3', 'gemma3:1b', 'qwen3-coder:30b-a3b-q4_K_M'
 
     Returns (repo_id, display_name, quantization).
     """
-    if ":" in name:
-        base, quant = name.rsplit(":", 1)
-    else:
-        base = name
-        quant = None
+    # Check if there's a size tag (like ":3b", ":270m") separate from the base name
+    # That is, has colon but no slash (to distinguish from HF repo 'namespace/model:quant')
+    has_size_tag = ":" in name and "/" not in name
 
-    # Check short name map first (with and without quant tag)
-    lookup = name if name in _SHORT_NAME_MAP else base
-    if lookup in _SHORT_NAME_MAP:
-        repo_id = _SHORT_NAME_MAP[lookup]
-        return repo_id, base, quant
+    # Check for direct key match first (e.g. 'llama3.2:3b' or 'gemma3:270m')
+    if name in _SHORT_NAME_MAP:
+        repo_id = _SHORT_NAME_MAP[name]
+        # If there's a size tag, extract it as quant and find base name for display
+        if has_size_tag:
+            # Extract size part as quant (e.g. "3b" from "llama3.2:3b")
+            size_part = name.split(":", 1)[1]
+            # Find base name by progressively shortening
+            import re
 
-    parts = base.split("/")
+            tokens = re.split(r"([:\-])", name)
+            for prefix in tokens[:-1]:  # skip the last (size part)
+                if prefix in _SHORT_NAME_MAP:
+                    return repo_id, prefix, size_part
+        return repo_id, name, None
+
+    # Try progressively shorter prefixes of name split on ':' and '-' boundaries
+    import re
+
+    tokens = re.split(r"([:\-])", name)
+    prefixes = []
+    current = ""
+    for token in tokens:
+        current += token
+        prefixes.append(current)
+    # Try longest-first (reverse order)
+    for prefix in reversed(prefixes):
+        if prefix in _SHORT_NAME_MAP:
+            repo_id = _SHORT_NAME_MAP[prefix]
+            remainder = name[len(prefix) :]
+            # Strip leading separator from remainder to get quantization
+            quant = remainder.lstrip(":-") or None
+            return repo_id, prefix, quant
+
+    # Not a short name — must be a full HF repo path (namespace/model or namespace/model:quant)
+    parts = name.split("/")
     if len(parts) < 2:
         raise ValueError(
             f"Model name must be in 'namespace/model' format or a known short name, got: {name}. "
             f"Available short names: {', '.join(sorted(_SHORT_NAME_MAP))}"
         )
 
+    # Full HF name - split off quantization if present
+    if ":" in name:
+        base, quant = name.rsplit(":", 1)
+    else:
+        base = name
+        quant = None
+
     return base, base, quant
 
 
-def _find_gguf_file(repo_id: str, quantization: str | None = None) -> str:
-    """Find a GGUF file in a HuggingFace repo.
+def _find_gguf_file(
+    repo_id: str, quantization: str | None = None, repo_files: list[str] | None = None
+) -> str:
+    """Find the first GGUF file in a HuggingFace repo matching the quantization.
 
     If quantization is specified (e.g. 'Q4_K_M'), look for a file containing it.
     Otherwise, prefer Q4_K_M or fall back to the first GGUF file found.
+    Pass repo_files to avoid a redundant API call.
     """
-    endpoint = get_hf_endpoint()
-    files = list_repo_files(repo_id, endpoint=endpoint)
-    gguf_files = [f for f in files if f.endswith(".gguf")]
+    if repo_files is None:
+        api = HfApi(endpoint=get_hf_endpoint())
+        repo_files = list(api.list_repo_files(repo_id))
+    gguf_files = [f for f in repo_files if f.endswith(".gguf")]
 
     if not gguf_files:
         raise ValueError(f"No GGUF files found in repo '{repo_id}'")
@@ -94,46 +137,136 @@ def _find_gguf_file(repo_id: str, quantization: str | None = None) -> str:
     return gguf_files[0]
 
 
+def _ssl_verify() -> bool:
+    return os.environ.get("LLAMACPP_SSL_VERIFY", "true").lower() not in ("0", "false", "no")
+
+
+def _download_resumable(url: str, dest: Path, max_retries: int = 10) -> None:
+    """Download a file with resume-on-error support using HTTP Range requests."""
+    headers = {}
+    if dest.exists():
+        headers["Range"] = f"bytes={dest.stat().st_size}-"
+
+    for attempt in range(max_retries):
+        try:
+            resumed_at = dest.stat().st_size if dest.exists() else 0
+            if resumed_at:
+                headers["Range"] = f"bytes={resumed_at}-"
+                print(f"Resuming from {resumed_at / 1024**3:.1f} GB...")
+
+            with httpx.stream(
+                "GET", url, headers=headers, follow_redirects=True, timeout=60, verify=_ssl_verify()
+            ) as resp:
+                if resp.status_code == 416:
+                    # Range not satisfiable: file is already fully downloaded
+                    print()
+                    return
+                resp.raise_for_status()
+
+                total = None
+                if resp.status_code == 206:  # Partial Content
+                    cr = resp.headers.get("Content-Range", "")
+                    if "/" in cr:
+                        total = int(cr.split("/")[-1])
+                elif resp.status_code == 200:
+                    resumed_at = 0  # Server doesn't support range, start over
+                    total = int(resp.headers.get("Content-Length", 0)) or None
+
+                mode = "ab" if resumed_at else "wb"
+                downloaded = resumed_at
+                with open(dest, mode) as f:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = downloaded / total * 100
+                            done = int(pct / 2)
+                            bar = "█" * done + "░" * (50 - done)
+                            gb_done = downloaded / 1024**3
+                            gb_total = total / 1024**3
+                            msg = f"\r  [{bar}] {gb_done:.1f}/{gb_total:.1f} GB ({pct:.1f}%)"
+                            print(msg, end="", flush=True)
+            print()  # newline after progress bar
+            return  # success
+
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+            if attempt < max_retries - 1:
+                wait = 2 ** min(attempt, 5)
+                retry_msg = (
+                    f"\n  Connection error ({e}). Retrying in {wait}s..."
+                    f" (attempt {attempt + 1}/{max_retries})"
+                )
+                print(retry_msg)
+                time.sleep(wait)
+            else:
+                raise
+
+
+def _find_all_shards(repo_files: list[str], first_shard: str) -> list[str]:
+    """Given the first shard filename, return all shards in order.
+
+    Detects the pattern *-NNNNN-of-MMMMM.gguf and returns all matching files.
+    Falls back to [first_shard] if no split pattern is found.
+    """
+    m = re.search(r"-(\d+)-of-(\d+)\.gguf$", first_shard, re.IGNORECASE)
+    if not m:
+        return [first_shard]
+
+    total = int(m.group(2))
+    prefix = first_shard[: m.start()]  # everything before "-NNNNN-of-MMMMM.gguf"
+    width = len(m.group(1))
+
+    shards = []
+    for i in range(1, total + 1):
+        shard = f"{prefix}-{str(i).zfill(width)}-of-{str(total).zfill(width)}.gguf"
+        # Use the actual filename from the repo if available (may be in a subdir)
+        match = next((f for f in repo_files if f.endswith(shard.split("/")[-1])), shard)
+        shards.append(match)
+    return shards
+
+
 def pull_model(name: str) -> None:
     """Download a GGUF model from Hugging Face."""
     repo_id, display_name, quantization = _parse_model_name(name)
 
-    # Check if already downloaded
-    existing = get_model(display_name)
-    if existing:
-        print(f"Model '{display_name}' already exists at {existing['path']}")
-        return
+    api = HfApi(endpoint=get_hf_endpoint())
+    repo_files = list(api.list_repo_files(repo_id))
 
-    filename = _find_gguf_file(repo_id, quantization)
-
-    print(f"Pulling {repo_id} ({filename})...")
-
-    # Download to cache, then copy to our models dir
-    endpoint = get_hf_endpoint()
-    cached_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-        endpoint=endpoint,
-    )
+    first_shard = _find_gguf_file(repo_id, quantization, repo_files=repo_files)
+    all_shards = _find_all_shards(repo_files, first_shard)
 
     models_dir = get_models_dir()
-    # Create a namespace subdir to avoid collisions
     model_subdir = models_dir / repo_id.replace("/", "--")
     model_subdir.mkdir(parents=True, exist_ok=True)
-    dest_path = model_subdir / filename
-    shutil.copy2(cached_path, dest_path)
 
-    size_bytes = dest_path.stat().st_size
+    # Check if all shards already on disk (handles prior partial download registered in DB)
+    all_dest = [model_subdir / Path(s).name for s in all_shards]
+    if all(d.exists() for d in all_dest):
+        existing = get_model(display_name)
+        if existing:
+            print(f"Model '{display_name}' already exists at {existing['path']}")
+            return
+
+    endpoint = get_hf_endpoint().rstrip("/")
+    total_size = 0
+
+    for i, (shard, dest_path) in enumerate(zip(all_shards, all_dest, strict=True), 1):
+        url = f"{endpoint}/{repo_id}/resolve/main/{shard}"
+        print(f"Pulling {repo_id} [{i}/{len(all_shards)}] {dest_path.name}...")
+        _download_resumable(url, dest_path)
+        total_size += dest_path.stat().st_size
+
+    # Register using the first shard as the model path (llama.cpp auto-discovers the rest)
     add_model(
         name=display_name,
         repo_id=repo_id,
-        filename=filename,
-        path=str(dest_path),
+        filename=first_shard,
+        path=str(all_dest[0]),
         quantization=quantization,
-        size_bytes=size_bytes,
+        size_bytes=total_size,
     )
 
-    print(f"Success! Model saved to {dest_path}")
+    print(f"Success! Model saved to {model_subdir}")
 
 
 def remove_model_and_file(name: str) -> None:

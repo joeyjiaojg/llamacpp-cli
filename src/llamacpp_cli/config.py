@@ -57,9 +57,7 @@ def find_llama_binary(name: str) -> str:
     if found:
         return found
 
-    raise FileNotFoundError(
-        f"Could not find '{name}'. Install llama.cpp or set LLAMACPP_BIN_DIR."
-    )
+    raise FileNotFoundError(f"Could not find '{name}'. Install llama.cpp or set LLAMACPP_BIN_DIR.")
 
 
 def get_hf_endpoint() -> str:
