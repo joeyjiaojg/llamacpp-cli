@@ -21,7 +21,21 @@ def run_model(
     binary = find_llama_binary("llama-cli")
 
     model_info = get_model(model)
-    model_path = model_info["path"] if model_info else model
+    if not model_info:
+        if "/" in model or model.endswith(".gguf"):
+            # Treat as a direct file path
+            model_path = model
+        else:
+            # Auto-pull like Ollama does
+            from .model_manager import pull_model
+            pull_model(model)
+            model_info = get_model(model)
+            if not model_info:
+                print(f"Failed to pull model '{model}'.")
+                return
+            model_path = model_info["path"]
+    else:
+        model_path = model_info["path"]
 
     cmd = [
         binary,

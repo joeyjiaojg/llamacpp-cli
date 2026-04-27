@@ -25,6 +25,8 @@ _SHORT_NAME_MAP: dict[str, str] = {
     "qwen3:1.7b": "Qwen/Qwen3-1.7B-GGUF",
     "qwen3:4b": "Qwen/Qwen3-4B-GGUF",
     "qwen3:8b": "Qwen/Qwen3-8B-GGUF",
+    "qwen3-coder": "Qwen/Qwen3-Coder-480B-A35B-GGUF",
+    "qwen3-coder:30b-a3b": "Qwen/Qwen3-Coder-30B-A3B-GGUF",
     "mistral": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
     "mistral:7b": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
     "phi3": "microsoft/Phi-3-mini-4k-instruct-gguf",
@@ -40,21 +42,46 @@ def _parse_model_name(name: str) -> tuple[str, str, str | None]:
 
     Supports:
       - Full HF names: 'TheBloke/LLaMA2-7B-Chat:Q4_K_M'
-      - Short names: 'gemma3', 'gemma3:270m', 'llama3.2:1b'
+      - Short names with optional size+quant: 'gemma3', 'gemma3:1b', 'qwen3-coder:30b-a3b-q4_K_M'
+
+    For short names, tries progressively shorter prefixes to find the longest map match,
+    treating the remainder as the quantization tag.
 
     Returns (repo_id, display_name, quantization).
     """
+    # Try progressively shorter prefixes of 'name' split on ':' and '-' boundaries
+    # to find the longest matching key in _SHORT_NAME_MAP.
+    # e.g. "qwen3-coder:30b-a3b-q4_K_M" tries:
+    #   "qwen3-coder:30b-a3b-q4_K_M" -> not found
+    #   "qwen3-coder:30b-a3b"         -> found! remainder "q4_K_M" = quantization
+    #   "qwen3-coder:30b"             -> would match if present
+    #   "qwen3-coder"                 -> fallback
+    parts = []
+    # Build list of split points (after each ':' or '-' boundary)
+    import re
+    tokens = re.split(r"([:\-])", name)
+    # tokens alternates between text and separators: ["qwen3", "-", "coder", ":", "30b", "-", "a3b", "-", "q4_K_M"]
+    # Rebuild prefixes by joining 0..n tokens
+    prefixes = []
+    current = ""
+    for token in tokens:
+        current += token
+        prefixes.append(current)
+    # Try longest-first (reverse order)
+    for prefix in reversed(prefixes):
+        if prefix in _SHORT_NAME_MAP:
+            repo_id = _SHORT_NAME_MAP[prefix]
+            remainder = name[len(prefix):]
+            # Strip leading separator from remainder to get quantization
+            quant = remainder.lstrip(":-") or None
+            return repo_id, prefix, quant
+
+    # Not a short name — must be a full HF repo path (namespace/model or namespace/model:quant)
     if ":" in name:
         base, quant = name.rsplit(":", 1)
     else:
         base = name
         quant = None
-
-    # Check short name map first (with and without quant tag)
-    lookup = name if name in _SHORT_NAME_MAP else base
-    if lookup in _SHORT_NAME_MAP:
-        repo_id = _SHORT_NAME_MAP[lookup]
-        return repo_id, base, quant
 
     parts = base.split("/")
     if len(parts) < 2:
