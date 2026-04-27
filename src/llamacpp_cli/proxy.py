@@ -19,7 +19,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 
-from .db import get_model
+from contextlib import asynccontextmanager
+
+from .db import get_model, list_models
 from .run import _is_local_path
 from .server import build_server_cmd, wait_until_ready
 
@@ -173,8 +175,19 @@ async def _forward_request(request: Request, state: ProxyState) -> Response:
     )
 
 
-def create_app(state: ProxyState) -> FastAPI:
-    app = FastAPI(title="llamacpp-proxy")
+def create_app(state: ProxyState, default_model: str | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):  # noqa: ARG001
+        if default_model:
+            print(f"[proxy] Pre-loading default model '{default_model}'…")
+            try:
+                await _ensure_model_loaded(default_model, state)
+            except Exception as exc:
+                print(f"[proxy] Warning: failed to pre-load '{default_model}': {exc}")
+        yield
+        # Shutdown: nothing extra needed here — run_proxy handles cleanup.
+
+    app = FastAPI(title="llamacpp-proxy", lifespan=lifespan)
 
     @app.api_route(
         "/{path:path}",
@@ -202,11 +215,19 @@ def run_proxy(
     """Start the proxy in the foreground (blocking). Ctrl+C shuts everything down."""
     import uvicorn
 
+    # Pick the most recently downloaded model as the default.
+    default_model: str | None = None
+    models = list_models()
+    if models:
+        default_model = models[0]["name"]
+        print(f"[proxy] Default model: '{default_model}'")
+    else:
+        print("[proxy] No models downloaded yet. Use 'llamacpp pull <model>' to add one.")
+
     state = ProxyState(server_port=server_port, extra_args=extra_args or [])
-    app = create_app(state)
+    app = create_app(state, default_model=default_model)
 
     print(f"llamacpp proxy listening on {host}:{port} (backend on 127.0.0.1:{server_port})")
-    print("Send requests with a 'model' field and the model will be loaded automatically.")
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
