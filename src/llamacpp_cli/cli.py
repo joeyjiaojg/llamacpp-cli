@@ -24,22 +24,25 @@ def pull(model: str) -> None:
     pull_model(model)
 
 
-@cli.command()
+@cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
 @click.argument("model")
 @click.option("--prompt", "-p", default=None, help="Run a single prompt and exit.")
 @click.option("--ctx-size", "-c", default=2048, help="Context window size.")
 @click.option("--n-gpu-layers", "-ngl", default=-1, help="GPU layers (-1 for all).")
-@click.option("--args", "extra_args", multiple=True, help="Extra args passed to llama-cli.")
+@click.pass_context
 def run(
+    ctx: click.Context,
     model: str,
     prompt: str | None,
     ctx_size: int,
     n_gpu_layers: int,
-    extra_args: tuple[str, ...],
 ) -> None:
     """Run a model interactively using llama.cpp.
 
     MODEL can be a registered model name or a path to a GGUF file.
+    Extra args after -- are forwarded to llama-cli, e.g.:
+
+        llamacpp run mymodel -- -t 8 --temp 0.7
     """
     from .installer import ensure_llamacpp
     from .run import run_model
@@ -51,18 +54,23 @@ def run(
         prompt=prompt,
         n_ctx=ctx_size,
         n_gpu_layers=n_gpu_layers,
-        extra_args=list(extra_args) or None,
+        extra_args=ctx.args or None,
     )
 
 
-@cli.command()
+@cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
 @click.option("--host", default="127.0.0.1", help="Host to bind.")
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="Internal llama-server port (auto-managed).")
-@click.option("--args", "extra_args", multiple=True, help="Extra args passed to llama-server.")
 @click.option("--startup-timeout", default=120.0, type=float, show_default=True, help="Seconds to wait for llama-server to become ready.")
-def serve(host: str, port: int, server_port: int, extra_args: tuple[str, ...], startup_timeout: float) -> None:
-    """Start the llama.cpp server (auto-loads models on demand like Ollama)."""
+@click.pass_context
+def serve(ctx: click.Context, host: str, port: int, server_port: int, startup_timeout: float) -> None:
+    """Start the llama.cpp server (auto-loads models on demand like Ollama).
+
+    Extra args after -- are forwarded to llama-server, e.g.:
+
+        llamacpp serve -- -t 8 -tb 4 --ctx-size 4096
+    """
     from .installer import ensure_llamacpp
     from .proxy import run_proxy
 
@@ -72,7 +80,7 @@ def serve(host: str, port: int, server_port: int, extra_args: tuple[str, ...], s
         host=host,
         port=port,
         server_port=server_port,
-        extra_args=list(extra_args) or None,
+        extra_args=ctx.args or None,
         startup_timeout=startup_timeout,
     )
 
