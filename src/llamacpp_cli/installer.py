@@ -129,6 +129,15 @@ def install_llamacpp() -> bool:
             print(f"Unknown archive format: {filename}")
             return False
 
+    # If the archive extracted into a single subdirectory, promote its contents
+    # up to bin_dir so binaries are directly accessible.
+    entries = list(bin_dir.iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        subdir = entries[0]
+        for item in subdir.iterdir():
+            item.rename(bin_dir / item.name)
+        subdir.rmdir()
+
     # Make binaries executable
     for f in bin_dir.iterdir():
         if f.is_file():
