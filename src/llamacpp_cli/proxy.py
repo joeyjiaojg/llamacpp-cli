@@ -107,7 +107,7 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
             state.current_model = None
             raise
 
-        print(f"[proxy] Model '{model}' ready.")
+        print(f"[proxy] Model '{canonical}' ready.")
         state.ready_event.set()
 
 
@@ -215,7 +215,22 @@ def run_proxy(
     startup_timeout: float = 120.0,
 ) -> None:
     """Start the proxy in the foreground (blocking). Ctrl+C shuts everything down."""
+    import socket
+
     import uvicorn
+
+    # Fail fast with a clear message if the port is already in use.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+        _s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            _s.bind((host, port))
+        except OSError:
+            print(
+                f"[proxy] Error: port {port} is already in use.\n"
+                f"  Kill the existing process or use --port <N> to pick another port.\n"
+                f"  To find it: lsof -i :{port} or ss -tlnp | grep {port}"
+            )
+            sys.exit(1)
 
     # Pick the most recently downloaded model as the default.
     default_model: str | None = None
