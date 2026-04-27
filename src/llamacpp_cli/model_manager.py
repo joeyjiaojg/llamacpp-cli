@@ -2,6 +2,7 @@
 
 import contextlib
 import os
+import re
 import time
 from pathlib import Path
 
@@ -95,15 +96,17 @@ def _parse_model_name(name: str) -> tuple[str, str, str | None]:
     return base, base, quant
 
 
-def _find_gguf_file(repo_id: str, quantization: str | None = None) -> str:
-    """Find a GGUF file in a HuggingFace repo.
+def _find_gguf_file(repo_id: str, quantization: str | None = None, repo_files: list[str] | None = None) -> str:
+    """Find the first GGUF file in a HuggingFace repo matching the quantization.
 
     If quantization is specified (e.g. 'Q4_K_M'), look for a file containing it.
     Otherwise, prefer Q4_K_M or fall back to the first GGUF file found.
+    Pass repo_files to avoid a redundant API call.
     """
-    api = HfApi(endpoint=get_hf_endpoint())
-    files = api.list_repo_files(repo_id)
-    gguf_files = [f for f in files if f.endswith(".gguf")]
+    if repo_files is None:
+        api = HfApi(endpoint=get_hf_endpoint())
+        repo_files = list(api.list_repo_files(repo_id))
+    gguf_files = [f for f in repo_files if f.endswith(".gguf")]
 
     if not gguf_files:
         raise ValueError(f"No GGUF files found in repo '{repo_id}'")
@@ -177,41 +180,71 @@ def _download_resumable(url: str, dest: Path, max_retries: int = 10) -> None:
                 raise
 
 
+def _find_all_shards(repo_files: list[str], first_shard: str) -> list[str]:
+    """Given the first shard filename, return all shards in order.
+
+    Detects the pattern *-NNNNN-of-MMMMM.gguf and returns all matching files.
+    Falls back to [first_shard] if no split pattern is found.
+    """
+    m = re.search(r"-(\d+)-of-(\d+)\.gguf$", first_shard, re.IGNORECASE)
+    if not m:
+        return [first_shard]
+
+    total = int(m.group(2))
+    prefix = first_shard[: m.start()]  # everything before "-NNNNN-of-MMMMM.gguf"
+    width = len(m.group(1))
+
+    shards = []
+    for i in range(1, total + 1):
+        shard = f"{prefix}-{str(i).zfill(width)}-of-{str(total).zfill(width)}.gguf"
+        # Use the actual filename from the repo if available (may be in a subdir)
+        match = next((f for f in repo_files if f.endswith(shard.split("/")[-1])), shard)
+        shards.append(match)
+    return shards
+
+
 def pull_model(name: str) -> None:
     """Download a GGUF model from Hugging Face."""
     repo_id, display_name, quantization = _parse_model_name(name)
 
-    # Check if already downloaded
-    existing = get_model(display_name)
-    if existing:
-        print(f"Model '{display_name}' already exists at {existing['path']}")
-        return
+    api = HfApi(endpoint=get_hf_endpoint())
+    repo_files = list(api.list_repo_files(repo_id))
 
-    filename = _find_gguf_file(repo_id, quantization)
+    first_shard = _find_gguf_file(repo_id, quantization, repo_files=repo_files)
+    all_shards = _find_all_shards(repo_files, first_shard)
 
     models_dir = get_models_dir()
     model_subdir = models_dir / repo_id.replace("/", "--")
     model_subdir.mkdir(parents=True, exist_ok=True)
-    # Flatten subdirs in filename to avoid nested dirs (e.g. "subdir/file.gguf")
-    dest_path = model_subdir / Path(filename).name
+
+    # Check if all shards already on disk (handles prior partial download registered in DB)
+    all_dest = [model_subdir / Path(s).name for s in all_shards]
+    if all(d.exists() for d in all_dest):
+        existing = get_model(display_name)
+        if existing:
+            print(f"Model '{display_name}' already exists at {existing['path']}")
+            return
 
     endpoint = get_hf_endpoint().rstrip("/")
-    url = f"{endpoint}/{repo_id}/resolve/main/{filename}"
+    total_size = 0
 
-    print(f"Pulling {repo_id} ({filename})...")
-    _download_resumable(url, dest_path)
+    for i, (shard, dest_path) in enumerate(zip(all_shards, all_dest), 1):
+        url = f"{endpoint}/{repo_id}/resolve/main/{shard}"
+        print(f"Pulling {repo_id} [{i}/{len(all_shards)}] {dest_path.name}...")
+        _download_resumable(url, dest_path)
+        total_size += dest_path.stat().st_size
 
-    size_bytes = dest_path.stat().st_size
+    # Register using the first shard as the model path (llama.cpp auto-discovers the rest)
     add_model(
         name=display_name,
         repo_id=repo_id,
-        filename=filename,
-        path=str(dest_path),
+        filename=first_shard,
+        path=str(all_dest[0]),
         quantization=quantization,
-        size_bytes=size_bytes,
+        size_bytes=total_size,
     )
 
-    print(f"Success! Model saved to {dest_path}")
+    print(f"Success! Model saved to {model_subdir}")
 
 
 def remove_model_and_file(name: str) -> None:
