@@ -58,6 +58,7 @@ def _find_release_asset(assets, pattern):
 
 def _get_bin_dir():
     import os
+
     base = os.path.expanduser("~/.llamacpp")
     return Path(base) / "bin"
 

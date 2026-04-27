@@ -22,8 +22,7 @@ _SSL_VERIFY: bool | str = os.environ.get("LLAMACPP_SSL_VERIFY", "true").lower() 
 )
 if not _SSL_VERIFY:
     warnings.warn(
-        "SSL verification disabled via LLAMACPP_SSL_VERIFY. "
-        "Downloads are NOT verified.",
+        "SSL verification disabled via LLAMACPP_SSL_VERIFY. Downloads are NOT verified.",
         stacklevel=1,
     )
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

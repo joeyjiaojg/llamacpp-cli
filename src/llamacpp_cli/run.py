@@ -34,6 +34,7 @@ def run_model(
         else:
             # Auto-pull like Ollama does (handles both short names and HF repo IDs)
             from .model_manager import pull_model
+
             pull_model(model)
             model_info = get_model(model)
             if not model_info:
@@ -45,9 +46,12 @@ def run_model(
 
     cmd = [
         binary,
-        "--model", model_path,
-        "--ctx-size", str(n_ctx),
-        "--n-gpu-layers", str(n_gpu_layers),
+        "--model",
+        model_path,
+        "--ctx-size",
+        str(n_ctx),
+        "--n-gpu-layers",
+        str(n_gpu_layers),
     ]
 
     if prompt:

@@ -47,24 +47,32 @@ def _parse_model_name(name: str) -> tuple[str, str, str | None]:
       - Full HF names: 'TheBloke/LLaMA2-7B-Chat:Q4_K_M'
       - Short names with optional size+quant: 'gemma3', 'gemma3:1b', 'qwen3-coder:30b-a3b-q4_K_M'
 
-    For short names, tries progressively shorter prefixes to find the longest map match,
-    treating the remainder as the quantization tag.
-
     Returns (repo_id, display_name, quantization).
     """
-    # Try progressively shorter prefixes of 'name' split on ':' and '-' boundaries
-    # to find the longest matching key in _SHORT_NAME_MAP.
-    # e.g. "qwen3-coder:30b-a3b-q4_K_M" tries:
-    #   "qwen3-coder:30b-a3b-q4_K_M" -> not found
-    #   "qwen3-coder:30b-a3b"         -> found! remainder "q4_K_M" = quantization
-    #   "qwen3-coder:30b"             -> would match if present
-    #   "qwen3-coder"                 -> fallback
-    parts = []
-    # Build list of split points (after each ':' or '-' boundary)
+    # Check if there's a size tag (like ":3b", ":270m") separate from the base name
+    # That is, has colon but no slash (to distinguish from HF repo 'namespace/model:quant')
+    has_size_tag = ":" in name and "/" not in name
+
+    # Check for direct key match first (e.g. 'llama3.2:3b' or 'gemma3:270m')
+    if name in _SHORT_NAME_MAP:
+        repo_id = _SHORT_NAME_MAP[name]
+        # If there's a size tag, extract it as quant and find base name for display
+        if has_size_tag:
+            # Extract size part as quant (e.g. "3b" from "llama3.2:3b")
+            size_part = name.split(":", 1)[1]
+            # Find base name by progressively shortening
+            import re
+
+            tokens = re.split(r"([:\-])", name)
+            for prefix in tokens[:-1]:  # skip the last (size part)
+                if prefix in _SHORT_NAME_MAP:
+                    return repo_id, prefix, size_part
+        return repo_id, name, None
+
+    # Try progressively shorter prefixes of name split on ':' and '-' boundaries
     import re
+
     tokens = re.split(r"([:\-])", name)
-    # tokens alternates between text and separators: ["qwen3", "-", "coder", ":", "30b", "-", "a3b", "-", "q4_K_M"]
-    # Rebuild prefixes by joining 0..n tokens
     prefixes = []
     current = ""
     for token in tokens:
@@ -74,29 +82,32 @@ def _parse_model_name(name: str) -> tuple[str, str, str | None]:
     for prefix in reversed(prefixes):
         if prefix in _SHORT_NAME_MAP:
             repo_id = _SHORT_NAME_MAP[prefix]
-            remainder = name[len(prefix):]
+            remainder = name[len(prefix) :]
             # Strip leading separator from remainder to get quantization
             quant = remainder.lstrip(":-") or None
             return repo_id, prefix, quant
 
     # Not a short name — must be a full HF repo path (namespace/model or namespace/model:quant)
-    if ":" in name:
-        base, quant = name.rsplit(":", 1)
-    else:
-        base = name
-        quant = None
-
-    parts = base.split("/")
+    parts = name.split("/")
     if len(parts) < 2:
         raise ValueError(
             f"Model name must be in 'namespace/model' format or a known short name, got: {name}. "
             f"Available short names: {', '.join(sorted(_SHORT_NAME_MAP))}"
         )
 
+    # Full HF name - split off quantization if present
+    if ":" in name:
+        base, quant = name.rsplit(":", 1)
+    else:
+        base = name
+        quant = None
+
     return base, base, quant
 
 
-def _find_gguf_file(repo_id: str, quantization: str | None = None, repo_files: list[str] | None = None) -> str:
+def _find_gguf_file(
+    repo_id: str, quantization: str | None = None, repo_files: list[str] | None = None
+) -> str:
     """Find the first GGUF file in a HuggingFace repo matching the quantization.
 
     If quantization is specified (e.g. 'Q4_K_M'), look for a file containing it.
@@ -143,7 +154,9 @@ def _download_resumable(url: str, dest: Path, max_retries: int = 10) -> None:
                 headers["Range"] = f"bytes={resumed_at}-"
                 print(f"Resuming from {resumed_at / 1024**3:.1f} GB...")
 
-            with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=60, verify=_ssl_verify()) as resp:
+            with httpx.stream(
+                "GET", url, headers=headers, follow_redirects=True, timeout=60, verify=_ssl_verify()
+            ) as resp:
                 if resp.status_code == 416:
                     # Range not satisfiable: file is already fully downloaded
                     print()
@@ -171,14 +184,19 @@ def _download_resumable(url: str, dest: Path, max_retries: int = 10) -> None:
                             bar = "█" * done + "░" * (50 - done)
                             gb_done = downloaded / 1024**3
                             gb_total = total / 1024**3
-                            print(f"\r  [{bar}] {gb_done:.1f}/{gb_total:.1f} GB ({pct:.1f}%)", end="", flush=True)
+                            msg = f"\r  [{bar}] {gb_done:.1f}/{gb_total:.1f} GB ({pct:.1f}%)"
+                            print(msg, end="", flush=True)
             print()  # newline after progress bar
             return  # success
 
         except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
             if attempt < max_retries - 1:
                 wait = 2 ** min(attempt, 5)
-                print(f"\n  Connection error ({e}). Retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
+                retry_msg = (
+                    f"\n  Connection error ({e}). Retrying in {wait}s..."
+                    f" (attempt {attempt + 1}/{max_retries})"
+                )
+                print(retry_msg)
                 time.sleep(wait)
             else:
                 raise
@@ -232,7 +250,7 @@ def pull_model(name: str) -> None:
     endpoint = get_hf_endpoint().rstrip("/")
     total_size = 0
 
-    for i, (shard, dest_path) in enumerate(zip(all_shards, all_dest), 1):
+    for i, (shard, dest_path) in enumerate(zip(all_shards, all_dest, strict=True), 1):
         url = f"{endpoint}/{repo_id}/resolve/main/{shard}"
         print(f"Pulling {repo_id} [{i}/{len(all_shards)}] {dest_path.name}...")
         _download_resumable(url, dest_path)

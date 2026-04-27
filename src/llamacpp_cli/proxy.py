@@ -12,14 +12,14 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
-
-from contextlib import asynccontextmanager
 
 from .db import get_model, list_models
 from .run import _is_local_path
@@ -79,6 +79,7 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
             print(f"[proxy] Pulling model '{model}'…")
             loop = asyncio.get_event_loop()
             from .model_manager import pull_model
+
             await loop.run_in_executor(None, pull_model, model)
             model_info = get_model(model)
             if not model_info:
@@ -138,13 +139,17 @@ async def _forward_request(request: Request, state: ProxyState) -> Response:
     body = await request.body()
 
     _HOP_BY_HOP = {
-        "host", "connection", "keep-alive", "proxy-authenticate",
-        "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
+        "host",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
     }
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in _HOP_BY_HOP
-    }
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
 
     backend_resp = await state.http_client.send(
         state.http_client.build_request(
@@ -157,7 +162,8 @@ async def _forward_request(request: Request, state: ProxyState) -> Response:
     )
 
     resp_headers = {
-        k: v for k, v in backend_resp.headers.items()
+        k: v
+        for k, v in backend_resp.headers.items()
         if k.lower() not in {"transfer-encoding", "connection"}
     }
 
@@ -241,7 +247,9 @@ def run_proxy(
     else:
         print("[proxy] No models downloaded yet. Use 'llamacpp pull <model>' to add one.")
 
-    state = ProxyState(server_port=server_port, extra_args=extra_args or [], startup_timeout=startup_timeout)
+    state = ProxyState(
+        server_port=server_port, extra_args=extra_args or [], startup_timeout=startup_timeout
+    )
     app = create_app(state, default_model=default_model)
 
     print(f"llamacpp proxy listening on {host}:{port} (backend on 127.0.0.1:{server_port})")

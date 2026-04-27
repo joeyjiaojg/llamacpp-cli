@@ -61,10 +61,18 @@ def run(
 @cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
 @click.option("--host", default="127.0.0.1", help="Host to bind.")
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
-@click.option("--server-port", default=8081, type=int, help="Internal llama-server port (auto-managed).")
-@click.option("--startup-timeout", default=120.0, type=float, show_default=True, help="Seconds to wait for llama-server to become ready.")
+@click.option("--server-port", default=8081, type=int, help="llama-server port (auto-managed).")
+@click.option(
+    "--startup-timeout",
+    default=120.0,
+    type=float,
+    show_default=True,
+    help="Startup timeout in seconds.",
+)
 @click.pass_context
-def serve(ctx: click.Context, host: str, port: int, server_port: int, startup_timeout: float) -> None:
+def serve(
+    ctx: click.Context, host: str, port: int, server_port: int, startup_timeout: float
+) -> None:
     """Start the llama.cpp server (auto-loads models on demand like Ollama).
 
     Extra args after -- are forwarded to llama-server, e.g.:

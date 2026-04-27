@@ -19,7 +19,8 @@ def _detect_cpu_topology() -> tuple[int, bool]:
     """
     try:
         node_dirs = [
-            e for e in os.scandir("/sys/devices/system/node/")
+            e
+            for e in os.scandir("/sys/devices/system/node/")
             if e.is_dir() and e.name.startswith("node")
         ]
         num_nodes = len(node_dirs)
@@ -117,6 +118,7 @@ def start_server(
             cmd.extend(["--model", model])
         else:
             from .model_manager import pull_model
+
             pull_model(model)
             model_info = get_model(model)
             if model_info:
