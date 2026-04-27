@@ -1,10 +1,12 @@
 """Model download and management from Hugging Face."""
 
 import contextlib
-import shutil
+import os
+import time
 from pathlib import Path
 
-from huggingface_hub import HfApi, hf_hub_download
+import httpx
+from huggingface_hub import HfApi
 
 from .config import get_hf_endpoint, get_models_dir
 from .db import add_model, get_model, list_models, remove_model
@@ -121,6 +123,60 @@ def _find_gguf_file(repo_id: str, quantization: str | None = None) -> str:
     return gguf_files[0]
 
 
+def _ssl_verify() -> bool:
+    return os.environ.get("LLAMACPP_SSL_VERIFY", "true").lower() not in ("0", "false", "no")
+
+
+def _download_resumable(url: str, dest: Path, max_retries: int = 10) -> None:
+    """Download a file with resume-on-error support using HTTP Range requests."""
+    headers = {}
+    if dest.exists():
+        headers["Range"] = f"bytes={dest.stat().st_size}-"
+
+    for attempt in range(max_retries):
+        try:
+            resumed_at = dest.stat().st_size if dest.exists() else 0
+            if resumed_at:
+                headers["Range"] = f"bytes={resumed_at}-"
+                print(f"Resuming from {resumed_at / 1024**3:.1f} GB...")
+
+            with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=60, verify=_ssl_verify()) as resp:
+                resp.raise_for_status()
+
+                total = None
+                if resp.status_code == 206:  # Partial Content
+                    cr = resp.headers.get("Content-Range", "")
+                    if "/" in cr:
+                        total = int(cr.split("/")[-1])
+                elif resp.status_code == 200:
+                    resumed_at = 0  # Server doesn't support range, start over
+                    total = int(resp.headers.get("Content-Length", 0)) or None
+
+                mode = "ab" if resumed_at else "wb"
+                downloaded = resumed_at
+                with open(dest, mode) as f:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = downloaded / total * 100
+                            done = int(pct / 2)
+                            bar = "█" * done + "░" * (50 - done)
+                            gb_done = downloaded / 1024**3
+                            gb_total = total / 1024**3
+                            print(f"\r  [{bar}] {gb_done:.1f}/{gb_total:.1f} GB ({pct:.1f}%)", end="", flush=True)
+            print()  # newline after progress bar
+            return  # success
+
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+            if attempt < max_retries - 1:
+                wait = 2 ** min(attempt, 5)
+                print(f"\n  Connection error ({e}). Retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+            else:
+                raise
+
+
 def pull_model(name: str) -> None:
     """Download a GGUF model from Hugging Face."""
     repo_id, display_name, quantization = _parse_model_name(name)
@@ -133,21 +189,17 @@ def pull_model(name: str) -> None:
 
     filename = _find_gguf_file(repo_id, quantization)
 
-    print(f"Pulling {repo_id} ({filename})...")
-
-    # Download to cache, then copy to our models dir
-    cached_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-        endpoint=get_hf_endpoint(),
-    )
-
     models_dir = get_models_dir()
-    # Create a namespace subdir to avoid collisions
     model_subdir = models_dir / repo_id.replace("/", "--")
     model_subdir.mkdir(parents=True, exist_ok=True)
-    dest_path = model_subdir / filename
-    shutil.copy2(cached_path, dest_path)
+    # Flatten subdirs in filename to avoid nested dirs (e.g. "subdir/file.gguf")
+    dest_path = model_subdir / Path(filename).name
+
+    endpoint = get_hf_endpoint().rstrip("/")
+    url = f"{endpoint}/{repo_id}/resolve/main/{filename}"
+
+    print(f"Pulling {repo_id} ({filename})...")
+    _download_resumable(url, dest_path)
 
     size_bytes = dest_path.stat().st_size
     add_model(
