@@ -4,6 +4,7 @@ import subprocess
 
 from .config import find_llama_binary
 from .db import get_model
+from .run import _is_local_path
 
 
 def start_server(
@@ -11,7 +12,7 @@ def start_server(
     host: str = "127.0.0.1",
     port: int = 8080,
     extra_args: list[str] | None = None,
-) -> subprocess.Popen:
+) -> subprocess.Popen | None:
     """Start the llama.cpp server as a subprocess.
 
     Returns the Popen object so the caller can manage the process.
@@ -24,9 +25,17 @@ def start_server(
         model_info = get_model(model)
         if model_info:
             cmd.extend(["--model", model_info["path"]])
-        else:
-            # Treat as a path
+        elif _is_local_path(model):
             cmd.extend(["--model", model])
+        else:
+            from .model_manager import pull_model
+            pull_model(model)
+            model_info = get_model(model)
+            if model_info:
+                cmd.extend(["--model", model_info["path"]])
+            else:
+                print(f"Failed to pull model '{model}'.")
+                return None
 
     if extra_args:
         cmd.extend(extra_args)
@@ -47,6 +56,8 @@ def run_server_foreground(
 ) -> None:
     """Start the server in the foreground (blocking). Handles Ctrl+C gracefully."""
     proc = start_server(model=model, host=host, port=port, extra_args=extra_args)
+    if proc is None:
+        return
 
     try:
         proc.wait()

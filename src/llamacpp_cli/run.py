@@ -1,9 +1,16 @@
 """Interactive chat mode — spawn llama.cpp for inference."""
 
 import subprocess
+from pathlib import Path
 
 from .config import find_llama_binary
 from .db import get_model
+
+
+def _is_local_path(model: str) -> bool:
+    """Return True if model looks like a local file path rather than an HF identifier."""
+    p = Path(model)
+    return p.is_file() or model.startswith(("/", "./", "../"))
 
 
 def run_model(
@@ -22,11 +29,10 @@ def run_model(
 
     model_info = get_model(model)
     if not model_info:
-        if "/" in model or model.endswith(".gguf"):
-            # Treat as a direct file path
+        if _is_local_path(model):
             model_path = model
         else:
-            # Auto-pull like Ollama does
+            # Auto-pull like Ollama does (handles both short names and HF repo IDs)
             from .model_manager import pull_model
             pull_model(model)
             model_info = get_model(model)
