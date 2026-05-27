@@ -56,3 +56,32 @@ def show_running() -> None:
         table.add_row(str(p["pid"]), p["comm"], p["etime"], p["args"])
 
     console.print(table)
+
+
+def stop_servers() -> None:
+    """Stop all running llama-server processes."""
+    import os
+    import signal
+
+    procs = _find_llamacpp_processes()
+    server_procs = [p for p in procs if "llama-server" in p["comm"] or "llama-server" in p["args"]]
+
+    if not server_procs:
+        print("No llama-server processes found.")
+        return
+
+    print(f"Found {len(server_procs)} llama-server process(es):")
+    for p in server_procs:
+        print(f"  PID {p['pid']}: {p['args']}")
+
+    print("\nStopping servers...")
+    for p in server_procs:
+        try:
+            os.kill(p["pid"], signal.SIGTERM)
+            print(f"  Sent SIGTERM to PID {p['pid']}")
+        except ProcessLookupError:
+            print(f"  PID {p['pid']} already terminated")
+        except PermissionError:
+            print(f"  Permission denied for PID {p['pid']} (not your process?)")
+
+    print("\nDone.")

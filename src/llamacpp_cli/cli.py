@@ -123,6 +123,14 @@ def ps() -> None:
 
 
 @cli.command()
+def stop() -> None:
+    """Stop running llama-server processes launched by 'llamacpp serve'."""
+    from .ps import stop_servers
+
+    stop_servers()
+
+
+@cli.command()
 @click.argument("model")
 @click.confirmation_option(prompt="Are you sure you want to delete this model?")
 def rm(model: str) -> None:
