@@ -59,7 +59,7 @@ def show_running() -> None:
 
 
 def stop_servers() -> None:
-    """Stop all running llama-server processes."""
+    """Stop all running llama-server processes and their parent llamacpp serve processes."""
     import os
     import signal
 
@@ -70,18 +70,52 @@ def stop_servers() -> None:
         print("No llama-server processes found.")
         return
 
-    print(f"Found {len(server_procs)} llama-server process(es):")
+    # Collect parent PIDs (likely the Python llamacpp serve processes)
+    parent_pids = set()
     for p in server_procs:
-        print(f"  PID {p['pid']}: {p['args']}")
-
-    print("\nStopping servers...")
-    for p in server_procs:
+        ppid = p["ppid"]
+        # Check if parent is a llamacpp serve process (Python process)
         try:
-            os.kill(p["pid"], signal.SIGTERM)
-            print(f"  Sent SIGTERM to PID {p['pid']}")
-        except ProcessLookupError:
-            print(f"  PID {p['pid']} already terminated")
-        except PermissionError:
-            print(f"  Permission denied for PID {p['pid']} (not your process?)")
+            import subprocess
+
+            result = subprocess.run(
+                ["ps", "-p", str(ppid), "-o", "args="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and "llamacpp serve" in result.stdout:
+                parent_pids.add(ppid)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    if parent_pids:
+        print(f"Found {len(parent_pids)} llamacpp serve parent process(es) to stop:")
+        for ppid in parent_pids:
+            print(f"  PID {ppid}")
+        print("\nStopping parent processes (this will clean up child llama-server processes)...")
+        for ppid in parent_pids:
+            try:
+                os.kill(ppid, signal.SIGTERM)
+                print(f"  Sent SIGTERM to PID {ppid}")
+            except ProcessLookupError:
+                print(f"  PID {ppid} already terminated")
+            except PermissionError:
+                print(f"  Permission denied for PID {ppid} (not your process?)")
+    else:
+        # No parent found, kill the server processes directly
+        print(f"Found {len(server_procs)} llama-server process(es):")
+        for p in server_procs:
+            print(f"  PID {p['pid']}: {p['args']}")
+
+        print("\nStopping servers...")
+        for p in server_procs:
+            try:
+                os.kill(p["pid"], signal.SIGTERM)
+                print(f"  Sent SIGTERM to PID {p['pid']}")
+            except ProcessLookupError:
+                print(f"  PID {p['pid']} already terminated")
+            except PermissionError:
+                print(f"  Permission denied for PID {p['pid']} (not your process?)")
 
     print("\nDone.")
