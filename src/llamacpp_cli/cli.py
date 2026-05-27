@@ -62,6 +62,7 @@ def run(
 @click.option("--host", default="127.0.0.1", help="Host to bind.")
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="llama-server port (auto-managed).")
+@click.option("--model", "-m", default=None, help="Model to pre-load at startup.")
 @click.option(
     "--ctx-size",
     "-c",
@@ -82,6 +83,7 @@ def serve(
     host: str,
     port: int,
     server_port: int,
+    model: str | None,
     ctx_size: int | None,
     startup_timeout: float,
 ) -> None:
@@ -89,7 +91,8 @@ def serve(
 
     Extra args after -- are forwarded to llama-server, e.g.:
 
-        llamacpp serve -- -t 8 -tb 4 --ctx-size 4096
+        llamacpp serve --model qwen3.5 -- -t 8 -tb 4
+        llamacpp serve -m qwen3:14b -c 8192
     """
     from .installer import ensure_llamacpp
     from .proxy import run_proxy
@@ -100,6 +103,7 @@ def serve(
         host=host,
         port=port,
         server_port=server_port,
+        default_model=model,
         ctx_size=ctx_size,
         extra_args=ctx.args or None,
         startup_timeout=startup_timeout,

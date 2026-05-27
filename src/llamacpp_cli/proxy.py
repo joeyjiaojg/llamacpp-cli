@@ -219,6 +219,7 @@ def run_proxy(
     host: str = "127.0.0.1",
     port: int = 8080,
     server_port: int = 8081,
+    default_model: str | None = None,
     ctx_size: int | None = None,
     extra_args: list[str] | None = None,
     startup_timeout: float = 120.0,
@@ -241,14 +242,16 @@ def run_proxy(
             )
             sys.exit(1)
 
-    # Pick the most recently downloaded model as the default.
-    default_model: str | None = None
-    models = list_models()
-    if models:
-        default_model = models[0]["name"]
-        print(f"[proxy] Default model: '{default_model}'")
+    # Determine default model: user-specified or most recently downloaded
+    if not default_model:
+        models = list_models()
+        if models:
+            default_model = models[0]["name"]
+            print(f"[proxy] Default model: '{default_model}'")
+        else:
+            print("[proxy] No models downloaded yet. Use 'llamacpp pull <model>' to add one.")
     else:
-        print("[proxy] No models downloaded yet. Use 'llamacpp pull <model>' to add one.")
+        print(f"[proxy] Default model: '{default_model}'")
 
     state = ProxyState(
         server_port=server_port,
