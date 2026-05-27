@@ -325,3 +325,34 @@ def _format_size(size_bytes: int | None) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} PB"
+
+
+def show_model_info(name: str) -> None:
+    """Display detailed information about a model (similar to ollama show)."""
+    model = get_model(name)
+    if not model:
+        print(f"Model '{name}' not found.")
+        print(f"\nUse 'llamacpp list' to see all downloaded models.")
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+
+    # Basic information
+    console.print(f"\n[bold cyan]{model['name']}[/bold cyan]")
+    console.print(f"Repository:     {model['repo_id']}")
+    console.print(f"Quantization:   {model['quantization'] or 'N/A'}")
+    console.print(f"Size:           {_format_size(model['size_bytes'])}")
+    console.print(f"Downloaded:     {model['downloaded_at']}")
+    console.print(f"File:           {model['path']}")
+
+    # Check if file exists
+    from pathlib import Path
+
+    model_path = Path(model["path"])
+    if not model_path.exists():
+        console.print("[red]Warning: Model file not found on disk[/red]")
+
+    console.print()

@@ -135,3 +135,12 @@ def install() -> None:
     from .installer import install_llamacpp
 
     install_llamacpp()
+
+
+@cli.command()
+@click.argument("model")
+def show(model: str) -> None:
+    """Show detailed information about a model."""
+    from .model_manager import show_model_info
+
+    show_model_info(model)
