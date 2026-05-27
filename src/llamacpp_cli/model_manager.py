@@ -327,6 +327,114 @@ def _format_size(size_bytes: int | None) -> str:
     return f"{size_bytes:.1f} PB"
 
 
+def _read_gguf_metadata(file_path: str) -> dict:
+    """Extract metadata from a GGUF file.
+
+    Returns a dict with metadata key-value pairs. Returns empty dict on error.
+    GGUF format: magic(4) version(4) tensor_count(8) metadata_kv_count(8) metadata_kvs...
+    """
+    import struct
+
+    def get_type_size(value_type):
+        """Return size in bytes for fixed-size types, or None for variable-size."""
+        size_map = {
+            4: 4,  # uint32
+            5: 4,  # int32
+            6: 8,  # uint64
+            7: 8,  # int64
+            10: 4,  # float32
+            11: 1,  # bool
+        }
+        return size_map.get(value_type)
+
+    def skip_value(f, value_type):
+        """Skip a value based on its type. Returns False if we should stop parsing."""
+        size = get_type_size(value_type)
+        if size:
+            f.read(size)
+            return True
+
+        if value_type == 8:  # string
+            str_len = struct.unpack("<Q", f.read(8))[0]
+            if str_len > 10 * 1024 * 1024:  # Skip strings larger than 10MB
+                return False
+            f.read(str_len)
+            return True
+        elif value_type == 9:  # array
+            array_type = struct.unpack("<I", f.read(4))[0]
+            array_len = struct.unpack("<Q", f.read(8))[0]
+
+            # For large arrays of fixed-size types, seek instead of reading
+            element_size = get_type_size(array_type)
+            if element_size and array_len > 0:
+                total_size = element_size * array_len
+                if total_size > 100 * 1024 * 1024:  # Skip arrays larger than 100MB
+                    return False
+                f.seek(total_size, 1)  # seek from current position
+                return True
+            elif array_type == 8:  # array of strings
+                for _ in range(min(array_len, 100)):  # limit to prevent issues
+                    if not skip_value(f, array_type):
+                        return False
+                return True
+            else:
+                # Unsupported nested array type
+                return False
+        else:
+            # Unknown type
+            return False
+
+    try:
+        with open(file_path, "rb") as f:
+            magic = f.read(4)
+            if magic != b"GGUF":
+                return {}
+
+            version = struct.unpack("<I", f.read(4))[0]
+            if version not in (2, 3):
+                return {}
+
+            tensor_count = struct.unpack("<Q", f.read(8))[0]
+            metadata_kv_count = struct.unpack("<Q", f.read(8))[0]
+
+            metadata = {}
+
+            for i in range(metadata_kv_count):
+                try:
+                    # Read key (length-prefixed string)
+                    key_len = struct.unpack("<Q", f.read(8))[0]
+                    key = f.read(key_len).decode("utf-8", errors="ignore")
+
+                    # Read value type
+                    value_type = struct.unpack("<I", f.read(4))[0]
+
+                    # Parse value based on type (only handle types we care about)
+                    if value_type == 4:  # uint32
+                        value = struct.unpack("<I", f.read(4))[0]
+                        metadata[key] = value
+                    elif value_type == 6:  # uint64
+                        value = struct.unpack("<Q", f.read(8))[0]
+                        metadata[key] = value
+                    elif value_type == 8:  # string
+                        str_len = struct.unpack("<Q", f.read(8))[0]
+                        if str_len > 10 * 1024 * 1024:  # Skip very large strings
+                            break
+                        value = f.read(str_len).decode("utf-8", errors="ignore")
+                        metadata[key] = value
+                    else:
+                        # Skip other types (arrays, floats, etc.)
+                        if not skip_value(f, value_type):
+                            # Stop parsing on error, but return what we have
+                            break
+                except (struct.error, MemoryError, OSError):
+                    # Stop parsing on any error, return what we have
+                    break
+
+            return metadata
+    except Exception:
+        return {}
+
+
 def show_model_info(name: str) -> None:
     """Display detailed information about a model (similar to ollama show)."""
     model = get_model(name)
@@ -335,8 +443,9 @@ def show_model_info(name: str) -> None:
         print(f"\nUse 'llamacpp list' to see all downloaded models.")
         return
 
+    from pathlib import Path
+
     from rich.console import Console
-    from rich.table import Table
 
     console = Console()
 
@@ -346,13 +455,33 @@ def show_model_info(name: str) -> None:
     console.print(f"Quantization:   {model['quantization'] or 'N/A'}")
     console.print(f"Size:           {_format_size(model['size_bytes'])}")
     console.print(f"Downloaded:     {model['downloaded_at']}")
-    console.print(f"File:           {model['path']}")
 
-    # Check if file exists
-    from pathlib import Path
-
+    # Check if file exists and extract metadata
     model_path = Path(model["path"])
     if not model_path.exists():
         console.print("[red]Warning: Model file not found on disk[/red]")
+    else:
+        # Extract context length from GGUF metadata
+        metadata = _read_gguf_metadata(str(model_path))
 
+        # Try to find context length - check architecture-specific keys first
+        ctx_length = None
+        # Common context length keys (architecture.context_length)
+        for key, value in metadata.items():
+            if key.endswith(".context_length") or key.endswith(".n_ctx_train"):
+                ctx_length = value
+                break
+
+        # Fall back to generic keys
+        if not ctx_length:
+            ctx_length = (
+                metadata.get("llama.context_length")
+                or metadata.get("context_length")
+                or metadata.get("n_ctx_train")
+            )
+
+        if ctx_length:
+            console.print(f"Context Length: {ctx_length:,}")
+
+    console.print(f"File:           {model['path']}")
     console.print()
