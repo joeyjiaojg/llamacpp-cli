@@ -54,6 +54,7 @@ def build_server_cmd(
     model_path: str,
     host: str = "127.0.0.1",
     port: int = 8080,
+    ctx_size: int | None = None,
     extra_args: list[str] | None = None,
 ) -> list[str]:
     """Build the llama-server command for a specific model path.
@@ -65,6 +66,10 @@ def build_server_cmd(
     cmd = [binary, "--host", host, "--port", str(port), "--model", model_path]
 
     extra = list(extra_args) if extra_args else []
+
+    # Apply context size override if specified and not already in extra_args
+    if ctx_size is not None and not _has_flag(extra, "--ctx-size", "-c"):
+        cmd += ["--ctx-size", str(ctx_size)]
 
     # Auto-tune for CPU topology if the user hasn't overridden threading.
     if not _has_flag(extra, "--threads", "-t"):

@@ -35,6 +35,7 @@ class ProxyState:
     # Set when the backend server is ready to accept requests.
     ready_event: asyncio.Event = field(default_factory=asyncio.Event)
     server_port: int = 8081
+    ctx_size: int | None = None
     extra_args: list[str] = field(default_factory=list)
     startup_timeout: float = 120.0
     # Persistent HTTP client — must outlive individual StreamingResponse bodies.
@@ -92,6 +93,7 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
             model_path,
             host="127.0.0.1",
             port=state.server_port,
+            ctx_size=state.ctx_size,
             extra_args=state.extra_args or None,
         )
         print(f"[proxy] Starting llama-server on port {state.server_port} with {canonical!r}")
@@ -217,6 +219,7 @@ def run_proxy(
     host: str = "127.0.0.1",
     port: int = 8080,
     server_port: int = 8081,
+    ctx_size: int | None = None,
     extra_args: list[str] | None = None,
     startup_timeout: float = 120.0,
 ) -> None:
@@ -248,7 +251,10 @@ def run_proxy(
         print("[proxy] No models downloaded yet. Use 'llamacpp pull <model>' to add one.")
 
     state = ProxyState(
-        server_port=server_port, extra_args=extra_args or [], startup_timeout=startup_timeout
+        server_port=server_port,
+        ctx_size=ctx_size,
+        extra_args=extra_args or [],
+        startup_timeout=startup_timeout,
     )
     app = create_app(state, default_model=default_model)
 

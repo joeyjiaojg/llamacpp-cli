@@ -63,6 +63,13 @@ def run(
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="llama-server port (auto-managed).")
 @click.option(
+    "--ctx-size",
+    "-c",
+    default=None,
+    type=int,
+    help="Context window size (overrides model default).",
+)
+@click.option(
     "--startup-timeout",
     default=120.0,
     type=float,
@@ -71,7 +78,12 @@ def run(
 )
 @click.pass_context
 def serve(
-    ctx: click.Context, host: str, port: int, server_port: int, startup_timeout: float
+    ctx: click.Context,
+    host: str,
+    port: int,
+    server_port: int,
+    ctx_size: int | None,
+    startup_timeout: float,
 ) -> None:
     """Start the llama.cpp server (auto-loads models on demand like Ollama).
 
@@ -88,6 +100,7 @@ def serve(
         host=host,
         port=port,
         server_port=server_port,
+        ctx_size=ctx_size,
         extra_args=ctx.args or None,
         startup_timeout=startup_timeout,
     )
