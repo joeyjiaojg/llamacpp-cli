@@ -42,13 +42,13 @@ help:
 	@echo "  make restore-models        Restore models from models-backup.tar.gz"
 	@echo ""
 	@echo "Environment Variables:"
-	@echo "  SUBNET       Subnet to scan (default: 192.168.1.0/24)"
+	@echo "  SUBNET       Subnet(s) to scan - supports comma-separated (default: 192.168.1.0/24)"
 	@echo "  PROXY_PORT   Proxy listen port (default: 8080)"
 	@echo "  MODEL        Model name for pull command"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make start-backend MODEL_ARGS='--model qwen3.5'"
-	@echo "  make start-proxy SUBNET=10.0.0.0/24 PROXY_PORT=8080"
+	@echo "  make start-proxy SUBNET=10.231.213.0/24,10.231.214.0/24,10.231.215.0/24 PROXY_PORT=8081"
 	@echo "  make pull-model MODEL=qwen3.5"
 
 # ============================================================================
