@@ -12,6 +12,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import get_base_dir
+
+
+def _timestamp() -> str:
+    """Return current timestamp in format [YYYY-MM-DD HH:MM:SS]."""
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
 
 
 @dataclass
@@ -99,7 +105,7 @@ async def _check_backend_health(
                 data = resp.json()
             except Exception as e:
                 if verbose:
-                    print(f"[lb-proxy] {backend.url} rejected: JSON parse error - {e}", flush=True)
+                    print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: JSON parse error - {e}", flush=True)
                 return False
 
             # Validate OpenAI-compatible response format
@@ -109,18 +115,18 @@ async def _check_backend_health(
                     backend_key = resp.headers.get("Authorization")
                     if backend_key and backend_key != f"Bearer {auth_key}":
                         if verbose:
-                            print(f"[lb-proxy] {backend.url} rejected: auth key mismatch", flush=True)
+                            print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: auth key mismatch", flush=True)
                         return False
                 return True
             else:
                 if verbose:
-                    print(f"[lb-proxy] {backend.url} rejected: invalid format - data={type(data)}, has_data={'data' in data if isinstance(data, dict) else False}", flush=True)
+                    print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: invalid format - data={type(data)}, has_data={'data' in data if isinstance(data, dict) else False}", flush=True)
         else:
             if verbose:
-                print(f"[lb-proxy] {backend.url} rejected: status {resp.status_code}", flush=True)
+                print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: status {resp.status_code}", flush=True)
     except Exception as e:
         if verbose:
-            print(f"[lb-proxy] {backend.url} rejected: {type(e).__name__}: {e}", flush=True)
+            print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: {type(e).__name__}: {e}", flush=True)
 
     return False
 
@@ -156,9 +162,9 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
                 if healthy != previous_healthy:
                     if healthy:
                         await _refresh_backend_models(backend, state.http_client)
-                        print(f"[lb-proxy] Backend {backend.url} became healthy, models: {backend.models}", flush=True)
+                        print(f"{_timestamp()} [lb-proxy] Backend {backend.url} became healthy, models: {backend.models}", flush=True)
                     else:
-                        print(f"[lb-proxy] Backend {backend.url} became unhealthy", flush=True)
+                        print(f"{_timestamp()} [lb-proxy] Backend {backend.url} became unhealthy", flush=True)
                 elif healthy:
                     # Refresh models silently if still healthy
                     await _refresh_backend_models(backend, state.http_client)
@@ -176,11 +182,11 @@ async def _config_watch_loop(state: ProxyState, auth_key: str | None = None) -> 
         try:
             current_mtime = state.config_path.stat().st_mtime
             if current_mtime > last_mtime:
-                print(f"[lb-proxy] Config file changed, reloading backends…")
+                print(f"{_timestamp()} [lb-proxy] Config file changed, reloading backends…")
                 await _load_backends_from_config(state)
                 last_mtime = current_mtime
         except Exception as exc:
-            print(f"[lb-proxy] Error watching config: {exc}")
+            print(f"{_timestamp()} [lb-proxy] Error watching config: {exc}")
 
 
 async def _load_backends_from_config(state: ProxyState) -> None:
@@ -211,7 +217,7 @@ async def _load_backends_from_config(state: ProxyState) -> None:
                 for host, port in added:
                     backend = Backend(host=host, port=port)
                     state.backends.append(backend)
-                    print(f"[lb-proxy] Added backend: {backend.url}")
+                    print(f"{_timestamp()} [lb-proxy] Added backend: {backend.url}")
                     # Trigger immediate health check
                     healthy = await _check_backend_health(backend, state.http_client, auth_key)
                     backend.healthy = healthy
@@ -226,10 +232,10 @@ async def _load_backends_from_config(state: ProxyState) -> None:
                     b for b in state.backends if (b.host, b.port) not in removed
                 ]
                 for host, port in removed:
-                    print(f"[lb-proxy] Removed backend: http://{host}:{port}")
+                    print(f"{_timestamp()} [lb-proxy] Removed backend: http://{host}:{port}")
 
     except Exception as exc:
-        print(f"[lb-proxy] Error loading config: {exc}")
+        print(f"{_timestamp()} [lb-proxy] Error loading config: {exc}")
 
 
 async def _discover_backends_on_subnet(
@@ -241,10 +247,10 @@ async def _discover_backends_on_subnet(
     try:
         network = ipaddress.ip_network(subnet, strict=False)
     except ValueError as exc:
-        print(f"[lb-proxy] Invalid subnet {subnet}: {exc}")
+        print(f"{_timestamp()} [lb-proxy] Invalid subnet {subnet}: {exc}")
         return
 
-    print(f"[lb-proxy] Scanning {subnet} for backends on port {port}…")
+    print(f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port {port}…")
     tasks = []
 
     async def _try_host(host: str) -> Backend | None:
@@ -267,7 +273,7 @@ async def _discover_backends_on_subnet(
                 if any(b.host == result.host and b.port == result.port for b in state.backends):
                     continue
                 state.backends.append(result)
-                print(f"[lb-proxy] Discovered backend: {result.url}, models: {result.models}")
+                print(f"{_timestamp()} [lb-proxy] Discovered backend: {result.url}, models: {result.models}")
 
 
 def _select_backend(
@@ -487,18 +493,18 @@ def run_lb_proxy(
     # Auth is opt-in: only use if explicitly provided
     # Don't auto-generate - makes discovery impossible
     if auth_key:
-        print(f"[lb-proxy] Authentication enabled (key: {auth_key[:8]}...)", flush=True)
-        print(f"[lb-proxy] Backends must include: Authorization: Bearer {auth_key}", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Authentication enabled (key: {auth_key[:8]}...)", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Backends must include: Authorization: Bearer {auth_key}", flush=True)
     else:
-        print(f"[lb-proxy] Authentication disabled - all backends will be discovered", flush=True)
-        print(f"[lb-proxy] Use --auth-key to enable authentication", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Authentication disabled - all backends will be discovered", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Use --auth-key to enable authentication", flush=True)
 
     # API key for client requests
     if api_key:
-        print(f"[lb-proxy] Client API key required (key: {api_key[:8]}...)", flush=True)
-        print(f"[lb-proxy] Clients must provide: Authorization: Bearer {api_key}", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Client API key required (key: {api_key[:8]}...)", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Clients must provide: Authorization: Bearer {api_key}", flush=True)
     else:
-        print(f"[lb-proxy] No API key required for clients", flush=True)
+        print(f"{_timestamp()} [lb-proxy] No API key required for clients", flush=True)
 
     # Check port availability
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
@@ -507,7 +513,7 @@ def run_lb_proxy(
             _s.bind((host, port))
         except OSError:
             print(
-                f"[lb-proxy] Error: port {port} is already in use.\n"
+                f"{_timestamp()} [lb-proxy] Error: port {port} is already in use.\n"
                 f"  Kill the existing process or use --port <N> to pick another port."
             )
             sys.exit(1)
@@ -521,8 +527,8 @@ def run_lb_proxy(
     if config_file:
         config_path = Path(config_file).expanduser().resolve()
         if not config_path.exists():
-            print(f"[lb-proxy] Config file not found: {config_path}")
-            print("[lb-proxy] Creating default config…")
+            print(f"{_timestamp()} [lb-proxy] Config file not found: {config_path}")
+            print(f"{_timestamp()} [lb-proxy] Creating default config…")
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps({"backends": []}, indent=2))
         state.config_path = config_path
@@ -532,7 +538,7 @@ def run_lb_proxy(
         if not config_path.exists():
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps({"backends": []}, indent=2))
-            print(f"[lb-proxy] Created default config: {config_path}")
+            print(f"{_timestamp()} [lb-proxy] Created default config: {config_path}")
         state.config_path = config_path
 
     # Add CLI backends
@@ -545,7 +551,7 @@ def run_lb_proxy(
                 backend = Backend(host=host_part, port=int(port_part))
                 state.backends.append(backend)
             except Exception as exc:
-                print(f"[lb-proxy] Invalid backend '{backend_str}': {exc}")
+                print(f"{_timestamp()} [lb-proxy] Invalid backend '{backend_str}': {exc}")
 
     # Initial load from config
     asyncio.run(_load_backends_from_config(state))
@@ -557,20 +563,20 @@ def run_lb_proxy(
     discover_tasks = []
     if discover_subnet:
         subnets = [s.strip() for s in discover_subnet.split(",")]
-        print(f"[lb-proxy] Starting background discovery for {len(subnets)} subnet(s)...", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Starting background discovery for {len(subnets)} subnet(s)...", flush=True)
 
         async def _discover_and_check(subnet: str) -> None:
             """Discover backends on a subnet in the background."""
             # Create a new httpx client for this thread (httpx clients are not thread-safe)
             async with httpx.AsyncClient(timeout=5.0) as client:
-                print(f"[lb-proxy] Scanning {subnet} for backends on port {discover_port}…", flush=True)
+                print(f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port {discover_port}…", flush=True)
 
                 # Modified version of _discover_backends_on_subnet that uses local client
                 import ipaddress
                 try:
                     network = ipaddress.ip_network(subnet, strict=False)
                 except ValueError as exc:
-                    print(f"[lb-proxy] Invalid subnet {subnet}: {exc}", flush=True)
+                    print(f"{_timestamp()} [lb-proxy] Invalid subnet {subnet}: {exc}", flush=True)
                     return
 
                 tasks = []
@@ -594,9 +600,9 @@ def run_lb_proxy(
                             if any(b.host == result.host and b.port == result.port for b in state.backends):
                                 continue
                             state.backends.append(result)
-                            print(f"[lb-proxy] Discovered backend: {result.url}, models: {result.models}", flush=True)
+                            print(f"{_timestamp()} [lb-proxy] Discovered backend: {result.url}, models: {result.models}", flush=True)
 
-                print(f"[lb-proxy] Completed scan of {subnet}", flush=True)
+                print(f"{_timestamp()} [lb-proxy] Completed scan of {subnet}", flush=True)
 
         for subnet in subnets:
             discover_tasks.append(_discover_and_check(subnet))
@@ -609,17 +615,17 @@ def run_lb_proxy(
             backend.last_health_check = time.time()
             if healthy:
                 await _refresh_backend_models(backend, state.http_client)
-                print(f"[lb-proxy] Backend {backend.url} ready, models: {backend.models}", flush=True)
+                print(f"{_timestamp()} [lb-proxy] Backend {backend.url} ready, models: {backend.models}", flush=True)
             else:
-                print(f"[lb-proxy] Backend {backend.url} unhealthy", flush=True)
+                print(f"{_timestamp()} [lb-proxy] Backend {backend.url} unhealthy", flush=True)
 
     asyncio.run(_initial_checks())
 
-    print(f"\nllamacpp load-balancer proxy listening on {host}:{port}", flush=True)
-    print(f"Config: {state.config_path}", flush=True)
-    print(f"Backends: {len([b for b in state.backends if b.healthy])}/{len(state.backends)} healthy", flush=True)
+    print(f"\n{_timestamp()} llamacpp load-balancer proxy listening on {host}:{port}", flush=True)
+    print(f"{_timestamp()} Config: {state.config_path}", flush=True)
+    print(f"{_timestamp()} Backends: {len([b for b in state.backends if b.healthy])}/{len(state.backends)} healthy", flush=True)
     if discover_subnet:
-        print(f"Discovery running in background for: {discover_subnet}", flush=True)
+        print(f"{_timestamp()} Discovery running in background for: {discover_subnet}", flush=True)
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
@@ -645,7 +651,7 @@ def run_lb_proxy(
     except KeyboardInterrupt:
         pass
     finally:
-        print("\n[lb-proxy] Shutting down…", flush=True)
+        print(f"\n{_timestamp()} [lb-proxy] Shutting down…", flush=True)
         asyncio.run(state.http_client.aclose())
-        print("[lb-proxy] Stopped.", flush=True)
+        print(f"{_timestamp()} [lb-proxy] Stopped.", flush=True)
         sys.exit(0)
