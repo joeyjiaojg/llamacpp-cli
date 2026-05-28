@@ -12,10 +12,24 @@
 ### Backend Server (on each machine)
 
 ```bash
+# 1. Build
 make build-backend
-make pull-model MODEL=qwen3.5
+
+# 2. Start (without model)
 make start-backend
+
+# 3. Pull model
+make pull-model MODEL=jc-builds/Qwen3.5-9B-Q4_K_M-GGUF
+
+# 4. Restart with model
+make stop-backend
+make start-backend MODEL_ARGS="--model Qwen3.5-9B-Q4_K_M"
+
+# Or in one command (after model is pulled)
+make start-backend MODEL_ARGS="--model Qwen3.5-9B-Q4_K_M"
 ```
+
+**Why restart?** The server loads the model at startup, so you need to restart after pulling.
 
 ### Proxy Server (on ONE machine)
 
@@ -31,7 +45,11 @@ make status-proxy  # Check discovered backends
 # Backend
 make logs-backend               # View logs
 make list-models                # Show models
+make restart-backend            # Restart (e.g., after pull)
 make test-backend               # Health check
+
+# Backend with model
+make start-backend MODEL_ARGS="--model qwen3.5"
 
 # Proxy
 make logs-proxy                 # View logs

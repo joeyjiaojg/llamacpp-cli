@@ -4,10 +4,9 @@
         pull-model list-models status-proxy \
         clean clean-volumes backup-models restore-models
 
-# Default subnet for proxy discovery (override with: make start-proxy SUBNET=10.0.0.0/24)
-SUBNET ?= 192.168.1.0/24
-PROXY_PORT ?= 8080
+# Default model (override with: make start-backend MODEL_ARGS="--model qwen3.5")
 MODEL ?=
+MODEL_ARGS ?=
 
 help:
 	@echo "llamacpp-cli Docker Management"
@@ -15,7 +14,9 @@ help:
 	@echo "Backend Server Commands (run on each backend machine):"
 	@echo "  make build-backend         Build backend Docker image"
 	@echo "  make start-backend         Start backend server (port 8000)"
+	@echo "  make start-backend MODEL_ARGS='--model qwen3.5'  Start with specific model"
 	@echo "  make stop-backend          Stop backend server"
+	@echo "  make restart-backend       Restart backend server"
 	@echo "  make logs-backend          View backend logs"
 	@echo "  make pull-model MODEL=name Pull a model on backend"
 	@echo "  make list-models           List models on backend"
@@ -53,12 +54,24 @@ build-backend:
 
 start-backend:
 	@echo "Starting backend server on port 8000..."
+	@if [ -n "$(MODEL_ARGS)" ]; then \
+		echo "Model args: $(MODEL_ARGS)"; \
+	else \
+		echo "No model specified. Use: make start-backend MODEL_ARGS='--model qwen3.5'"; \
+		echo "Or pull a model first: make pull-model MODEL=qwen3.5"; \
+	fi
 	@echo "Subnet discovery will find this backend automatically"
-	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
+	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) MODEL_ARGS="$(MODEL_ARGS)" \
 		docker compose -f docker-compose.backend.yml up -d
 	@echo ""
 	@echo "Backend started! Test with:"
 	@echo "  curl http://localhost:8000/health"
+
+restart-backend:
+	@echo "Restarting backend server..."
+	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) MODEL_ARGS="$(MODEL_ARGS)" \
+		docker compose -f docker-compose.backend.yml restart
+	@echo "Backend restarted!"
 
 stop-backend:
 	@echo "Stopping backend server..."
