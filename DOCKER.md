@@ -2,6 +2,59 @@
 
 Deploy llamacpp-cli in Docker with separate backend and proxy configurations.
 
+## Quick Start
+
+### On Each Backend Server
+
+```bash
+cd /path/to/llamacpp-cli
+
+# 1. Build image
+make build-backend
+
+# 2. Start temporarily to pull model
+make start-backend
+
+# 3. Pull model (downloads to persistent volume)
+make pull-model MODEL=jc-builds/Qwen3.5-9B-Q4_K_M-GGUF
+
+# 4. Restart with model loaded
+make restart-backend MODEL_ARGS="--model Qwen3.5-9B-Q4_K_M"
+
+# Verify
+curl http://localhost:8000/v1/models
+```
+
+### On Proxy Server (ONE machine)
+
+```bash
+cd /path/to/llamacpp-cli
+
+# 1. Build image
+make build-proxy
+
+# 2. Start with subnet discovery
+make start-proxy SUBNET=10.231.0.0/16
+
+# 3. Check discovered backends (wait 10-15 seconds)
+make status-proxy
+
+# 4. Test
+curl http://localhost:8080/v1/models
+```
+
+### Client Usage
+
+```bash
+# Point clients to the proxy
+curl http://proxy-ip:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen3.5-9B-Q4_K_M",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
 ## Architecture
 
 ```
@@ -108,9 +161,51 @@ make restore-models        # Restore from backup
 
 ## Deployment Scenarios
 
-### Scenario 1: Homogeneous Cluster (Same Model)
+### Scenario 1: Multiple Backends with Same Model (Load Distribution)
 
-All backends run the same model for load distribution:
+You have several high-CPU machines, all serving the same model:
+
+**On each backend** (192.168.1.10, 192.168.1.11, 192.168.1.12):
+
+```bash
+cd /path/to/llamacpp-cli
+
+# Build image
+make build-backend
+
+# Start temporarily to pull model
+make start-backend
+
+# Pull model (only needed once per machine)
+make pull-model MODEL=jc-builds/Qwen3.5-9B-Q4_K_M-GGUF
+
+# Restart with model loaded
+make restart-backend MODEL_ARGS="--model Qwen3.5-9B-Q4_K_M"
+
+# Verify
+curl http://localhost:8000/v1/models
+```
+
+**On proxy server** (192.168.1.100):
+
+```bash
+cd /path/to/llamacpp-cli
+
+# Build and start with subnet discovery
+make build-proxy
+make start-proxy SUBNET=192.168.1.0/24
+
+# Wait 10-15 seconds, then check
+make status-proxy
+
+# Expected: All 3 backends discovered with Qwen3.5-9B-Q4_K_M
+```
+
+Requests are distributed via **least-connections** load balancing across all backends.
+
+### Scenario 2: Different Models per Backend (Model-Aware Routing)
+
+Each backend runs a different model:
 
 ```bash
 # On each backend (192.168.1.10, .11, .12)
@@ -123,30 +218,64 @@ make start-proxy SUBNET=192.168.1.0/24
 
 Requests are distributed via least-connections load balancing.
 
-### Scenario 2: Heterogeneous Cluster (Different Models)
+### Scenario 2: Different Models per Backend (Model-Aware Routing)
 
 Each backend runs a different model:
 
+**Backend 1** (qwen3.5):
 ```bash
-# Backend 1: qwen3.5
+make build-backend
+make start-backend
 make pull-model MODEL=qwen3.5
-make start-backend MODEL_ARGS="--model qwen3.5"
+make restart-backend MODEL_ARGS="--model qwen3.5"
+```
 
-# Backend 2: llama3:8b
+**Backend 2** (llama3:8b):
+```bash
+make build-backend
+make start-backend
 make pull-model MODEL=llama3:8b
-make start-backend MODEL_ARGS="--model llama3:8b"
+make restart-backend MODEL_ARGS="--model llama3:8b"
+```
 
-# Backend 3: gemma3:2b
+**Backend 3** (gemma3:2b):
+```bash
+make build-backend
+make start-backend
 make pull-model MODEL=gemma3:2b
-make start-backend MODEL_ARGS="--model gemma3:2b"
+make restart-backend MODEL_ARGS="--model gemma3:2b"
+```
 
-# Proxy: auto-routes based on model field
+**Proxy** (auto-routes based on model field):
+```bash
+make build-proxy
 make start-proxy SUBNET=192.168.1.0/24
+# Or for different subnet: make start-proxy SUBNET=10.231.0.0/16
 ```
 
 The proxy routes requests to backends that have the requested model.
 
-### Scenario 3: Manual Configuration (No Discovery)
+### Scenario 3: Use .env File for Production
+
+On each backend, create `.env` to avoid typing MODEL_ARGS every time:
+
+```bash
+# Backend 1
+echo 'MODEL_ARGS=--model Qwen3.5-9B-Q4_K_M' > .env
+make start-backend  # Automatically uses model from .env
+
+# Backend 2  
+echo 'MODEL_ARGS=--model llama3:8b' > .env
+make start-backend
+
+# Backend 3
+echo 'MODEL_ARGS=--model gemma3:2b' > .env
+make start-backend
+```
+
+Then just `make start-backend` without specifying MODEL_ARGS.
+
+### Scenario 4: Manual Configuration (No Discovery)
 
 If subnet discovery doesn't work (firewall, VPN, etc.):
 
