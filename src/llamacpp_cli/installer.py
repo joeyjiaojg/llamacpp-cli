@@ -83,36 +83,45 @@ def install_llamacpp() -> bool:
     pattern = _PLATFORM_MAP[key]
     bin_dir = get_bin_dir()
 
-    print(f"Fetching latest llama.cpp release for {system} {machine}...")
+    # Check for direct download URL (bypasses GitHub API rate limits)
+    direct_url = os.environ.get("LLAMACPP_RELEASE_URL")
+    if direct_url:
+        print(f"Using direct download URL from LLAMACPP_RELEASE_URL...")
+        download_url = direct_url
+        filename = download_url.split("/")[-1]
+    else:
+        # Query GitHub API for latest release
+        print(f"Fetching latest llama.cpp release for {system} {machine}...")
 
-    # Support GitHub token to bypass rate limits
-    headers = {}
-    github_token = os.environ.get("GITHUB_TOKEN")
-    if github_token:
-        headers["Authorization"] = f"token {github_token}"
+        # Support GitHub token to bypass rate limits
+        headers = {}
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
 
-    try:
-        resp = requests.get(_RELEASE_API, timeout=15, verify=_SSL_VERIFY, headers=headers)
-        resp.raise_for_status()
-        release = resp.json()
-    except requests.RequestException as e:
-        print(f"Error fetching release info: {e}")
-        if "rate limit" in str(e).lower():
-            print("\nGitHub API rate limit exceeded.")
-            print("Solutions:")
-            print("  1. Wait an hour and try again")
-            print("  2. Set GITHUB_TOKEN environment variable with a personal access token")
-            print("  3. Use pre-built Docker image (llama.cpp is pre-installed)")
-        return False
+        try:
+            resp = requests.get(_RELEASE_API, timeout=15, verify=_SSL_VERIFY, headers=headers)
+            resp.raise_for_status()
+            release = resp.json()
+        except requests.RequestException as e:
+            print(f"Error fetching release info: {e}")
+            if "rate limit" in str(e).lower():
+                print("\nGitHub API rate limit exceeded.")
+                print("Solutions:")
+                print("  1. Wait an hour and try again")
+                print("  2. Set GITHUB_TOKEN environment variable with a personal access token")
+                print("  3. Set LLAMACPP_RELEASE_URL with direct download link (bypasses API)")
+                print(f"     Example: LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz")
+            return False
 
-    asset = _find_release_asset(release.get("assets", []), pattern)
-    if not asset:
-        print(f"No matching release found for pattern '{pattern}'.")
-        print("Install llama.cpp manually: https://github.com/ggml-org/llama.cpp")
-        return False
+        asset = _find_release_asset(release.get("assets", []), pattern)
+        if not asset:
+            print(f"No matching release found for pattern '{pattern}'.")
+            print("Install llama.cpp manually: https://github.com/ggml-org/llama.cpp")
+            return False
 
-    download_url = asset["browser_download_url"]
-    filename = asset["name"]
+        download_url = asset["browser_download_url"]
+        filename = asset["name"]
 
     print(f"Downloading {filename}...")
 

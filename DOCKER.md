@@ -236,8 +236,9 @@ Available variables:
 | `PROXY_PORT` | `8080` | Proxy listen port |
 | `MODEL` | - | Model name for `pull-model` |
 | `MODEL_ARGS` | - | Extra args for `llamacpp serve` |
-| `GITHUB_TOKEN` | - | GitHub token to bypass API rate limits |
-| `LLAMACPP_AUTO_INSTALL` | `true` | Auto-install llama.cpp without prompts (Docker default) |
+| `LLAMACPP_RELEASE_URL` | `https://github.com/...` | Direct download URL (bypasses API) |
+| `GITHUB_TOKEN` | - | GitHub token (alternative to direct URL) |
+| `LLAMACPP_AUTO_INSTALL` | `true` | Auto-install without prompts (Docker default) |
 
 ### Docker Compose Variables
 

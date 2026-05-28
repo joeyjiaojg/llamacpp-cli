@@ -1,6 +1,23 @@
 # Quick Fix for GitHub Rate Limit
 
-## Option 1: Use GitHub Token (Recommended)
+## ⚡ Best Solution: Use Direct Download URL (No API Needed!)
+
+The installer now supports **direct download URLs** that bypass the GitHub API entirely:
+
+```bash
+# Set direct URL (already set by default in docker-compose.backend.yml)
+export LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
+
+make start-backend
+```
+
+**Why this works:** Downloads directly from GitHub releases without querying the API. No rate limit!
+
+Find latest releases at: https://github.com/ggml-org/llama.cpp/releases
+
+## Alternative Options
+
+### Option 1: Use GitHub Token
 
 Create a GitHub token at: https://github.com/settings/tokens/new
 - No special permissions needed (can be blank scope)

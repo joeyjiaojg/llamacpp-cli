@@ -15,9 +15,11 @@ services:
     environment:
       - LLAMACPP_HOME=/data/llamacpp/.llamacpp
       - LLAMACPP_AUTO_INSTALL=true
+      # Direct download URL (bypasses GitHub API rate limits)
+      - LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
       # Optional: disable SSL verification for Hugging Face downloads behind proxy
       # - LLAMACPP_SSL_VERIFY=false
-      # Optional: GitHub token to avoid API rate limits during install
+      # Optional: GitHub token to avoid API rate limits (alternative to direct URL)
       # - GITHUB_TOKEN=${GITHUB_TOKEN}
     command: >
       bash -c "
