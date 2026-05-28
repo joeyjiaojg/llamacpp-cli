@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # Load balancer proxy - run this on ONE dedicated proxy server
+  lb-proxy:
+    build: .
+    container_name: llamacpp-lb-proxy
+    network_mode: host  # Required for subnet discovery
+    volumes:
+      # Config directory for lb_backends.json
+      - llamacpp-config:/data/llamacpp/.llamacpp
+    environment:
+      - LLAMACPP_HOME=/data/llamacpp/.llamacpp
+      # Subnet to scan for backends (override via env var or command)
+      - DISCOVER_SUBNET=${DISCOVER_SUBNET:-192.168.1.0/24}
+      - PROXY_PORT=${PROXY_PORT:-8080}
+    command: >
+      llamacpp lb-proxy
+        --host 0.0.0.0
+        --port ${PROXY_PORT:-8080}
+        --discover-subnet ${DISCOVER_SUBNET:-192.168.1.0/24}
+        --discover-port 8000
+        --config /data/llamacpp/.llamacpp/lb_backends.json
+    restart: unless-stopped
+
+volumes:
+  llamacpp-config:
+    driver: local

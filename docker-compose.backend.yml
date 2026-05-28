@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  # Backend llama.cpp server - run this on each backend machine
+  llama-server:
+    build: .
+    container_name: llamacpp-backend
+    volumes:
+      # Persistent model storage
+      - llamacpp-models:/data/llamacpp/.llamacpp/models
+      # llama.cpp binaries
+      - llamacpp-bin:/data/llamacpp/.llamacpp/bin
+      # Config directory
+      - llamacpp-config:/data/llamacpp/.llamacpp
+    ports:
+      - "8000:8000"  # Expose on host network for lb-proxy to discover
+    environment:
+      - LLAMACPP_HOME=/data/llamacpp/.llamacpp
+      # Optional: disable SSL verification for Hugging Face downloads behind proxy
+      # - LLAMACPP_SSL_VERIFY=false
+    command: >
+      bash -c "
+        llamacpp install &&
+        llamacpp serve --host 0.0.0.0 --port 8000 ${MODEL_ARGS}
+      "
+    restart: unless-stopped
+
+volumes:
+  llamacpp-models:
+    driver: local
+  llamacpp-bin:
+    driver: local
+  llamacpp-config:
+    driver: local

@@ -1,0 +1,72 @@
+# DEPRECATED: Use docker-compose.backend.yml or docker-compose.proxy.yml instead
+#
+# For backend servers: docker-compose -f docker-compose.backend.yml up -d
+# For proxy server:    docker-compose -f docker-compose.proxy.yml up -d
+# Or use Makefile:     make start-backend / make start-proxy
+#
+# This file is kept for backwards compatibility but shows the combined
+# single-machine setup (not recommended for production)
+
+version: '3.8'
+
+services:
+  # Single llama.cpp server instance
+  llama-server:
+    build: .
+    container_name: llamacpp-server
+    volumes:
+      # Persistent model storage
+      - llamacpp-models:/data/llamacpp/.llamacpp/models
+      # llama.cpp binaries
+      - llamacpp-bin:/data/llamacpp/.llamacpp/bin
+      # Config directory
+      - llamacpp-config:/data/llamacpp/.llamacpp
+    ports:
+      - "8000:8000"
+    environment:
+      - LLAMACPP_HOME=/data/llamacpp/.llamacpp
+      # Optional: disable SSL verification for Hugging Face downloads behind proxy
+      # - LLAMACPP_SSL_VERIFY=false
+    command: >
+      bash -c "
+        llamacpp install &&
+        llamacpp serve --host 0.0.0.0 --port 8000
+      "
+    restart: unless-stopped
+    networks:
+      - llamacpp-net
+
+  # Load balancer proxy for multi-backend deployments
+  lb-proxy:
+    build: .
+    container_name: llamacpp-lb-proxy
+    volumes:
+      # Share config with other services
+      - llamacpp-config:/data/llamacpp/.llamacpp
+    ports:
+      - "8080:8080"
+    environment:
+      - LLAMACPP_HOME=/data/llamacpp/.llamacpp
+    command: >
+      llamacpp lb-proxy
+        --host 0.0.0.0
+        --port 8080
+        --backend http://llama-server:8000
+        --config /data/llamacpp/.llamacpp/lb_backends.json
+    depends_on:
+      - llama-server
+    restart: unless-stopped
+    networks:
+      - llamacpp-net
+
+volumes:
+  llamacpp-models:
+    driver: local
+  llamacpp-bin:
+    driver: local
+  llamacpp-config:
+    driver: local
+
+networks:
+  llamacpp-net:
+    driver: bridge
