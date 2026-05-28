@@ -4,6 +4,9 @@
         pull-model list-models status-proxy \
         clean clean-volumes backup-models restore-models
 
+# Auto-detect docker compose command
+DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
 # Default model (override with: make start-backend MODEL_ARGS="--model qwen3.5")
 MODEL ?=
 MODEL_ARGS ?=
@@ -54,7 +57,7 @@ help:
 
 build-backend:
 	@echo "Building backend Docker image..."
-	docker compose -f docker-compose.backend.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build
 
 start-backend:
 	@echo "Starting backend server on port 8000..."
@@ -66,7 +69,7 @@ start-backend:
 	fi
 	@echo "Subnet discovery will find this backend automatically"
 	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) MODEL_ARGS="$(MODEL_ARGS)" \
-		docker compose -f docker-compose.backend.yml up -d
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml up -d
 	@echo ""
 	@echo "Backend started! Test with:"
 	@echo "  curl http://localhost:8000/health"
@@ -74,15 +77,15 @@ start-backend:
 restart-backend:
 	@echo "Restarting backend server..."
 	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) MODEL_ARGS="$(MODEL_ARGS)" \
-		docker compose -f docker-compose.backend.yml restart
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml restart
 	@echo "Backend restarted!"
 
 stop-backend:
 	@echo "Stopping backend server..."
-	docker compose -f docker-compose.backend.yml down
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml down
 
 logs-backend:
-	docker compose -f docker-compose.backend.yml logs -f
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml logs -f
 
 pull-model:
 	@if [ -z "$(MODEL)" ]; then \
@@ -90,11 +93,11 @@ pull-model:
 		exit 1; \
 	fi
 	@echo "Pulling model: $(MODEL)"
-	docker compose -f docker-compose.backend.yml exec llama-server llamacpp pull $(MODEL)
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml exec llama-server llamacpp pull $(MODEL)
 
 list-models:
 	@echo "Models on this backend:"
-	docker compose -f docker-compose.backend.yml exec llama-server llamacpp list
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml exec llama-server llamacpp list
 
 # ============================================================================
 # Proxy Server (run on ONE proxy machine)
@@ -102,14 +105,14 @@ list-models:
 
 build-proxy:
 	@echo "Building proxy Docker image..."
-	docker compose -f docker-compose.proxy.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build
 
 start-proxy:
 	@echo "Starting lb-proxy with subnet discovery..."
 	@echo "Scanning subnet: $(SUBNET)"
 	@echo "Proxy port: $(PROXY_PORT)"
 	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
-		docker compose -f docker-compose.proxy.yml up -d
+		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d
 	@echo ""
 	@echo "Proxy started! Access at:"
 	@echo "  http://localhost:$(PROXY_PORT)/v1/models"
@@ -119,10 +122,10 @@ start-proxy:
 
 stop-proxy:
 	@echo "Stopping lb-proxy..."
-	docker compose -f docker-compose.proxy.yml down
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml down
 
 logs-proxy:
-	docker compose -f docker-compose.proxy.yml logs -f
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml logs -f
 
 status-proxy:
 	@echo "Querying proxy backend status..."
@@ -135,16 +138,16 @@ status-proxy:
 
 clean:
 	@echo "Stopping all containers..."
-	docker compose -f docker-compose.backend.yml down 2>/dev/null || true
-	docker compose -f docker-compose.proxy.yml down 2>/dev/null || true
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml down 2>/dev/null || true
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml down 2>/dev/null || true
 
 clean-volumes:
 	@echo "WARNING: This will delete all models and data!"
 	@read -p "Are you sure? [y/N] " -n 1 -r; \
 	echo; \
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
-		docker compose -f docker-compose.backend.yml down -v; \
-		docker compose -f docker-compose.proxy.yml down -v; \
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml down -v; \
+		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml down -v; \
 		echo "Volumes removed"; \
 	else \
 		echo "Cancelled"; \
