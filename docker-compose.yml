@@ -1,13 +1,11 @@
 # DEPRECATED: Use docker-compose.backend.yml or docker-compose.proxy.yml instead
 #
-# For backend servers: docker-compose -f docker-compose.backend.yml up -d
-# For proxy server:    docker-compose -f docker-compose.proxy.yml up -d
+# For backend servers: docker compose -f docker-compose.backend.yml up -d
+# For proxy server:    docker compose -f docker-compose.proxy.yml up -d
 # Or use Makefile:     make start-backend / make start-proxy
 #
 # This file is kept for backwards compatibility but shows the combined
 # single-machine setup (not recommended for production)
-
-version: '3.8'
 
 services:
   # Single llama.cpp server instance

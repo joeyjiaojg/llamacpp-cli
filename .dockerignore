@@ -40,8 +40,8 @@ htmlcov/
 .dockerignore
 docker-compose*.yml
 
-# Documentation
-*.md
+# Documentation (but keep README.md for pip install)
+!README.md
 docs/
 
 # Examples and tests

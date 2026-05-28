@@ -14,10 +14,10 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Copy project files
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 COPY src/ src/
 
-# Install Python package
+# Install Python package (README.md is optional for pip install -e)
 RUN pip install --no-cache-dir -e .
 
 # Create llamacpp home directory

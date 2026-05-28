@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Load balancer proxy - run this on ONE dedicated proxy server
   lb-proxy:

@@ -6,3 +6,6 @@ dist/
 src/llamacpp_cli.egg-info/
 *.pyc
 __pycache__
+
+# Debug scripts
+debug_*.sh

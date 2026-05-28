@@ -49,23 +49,23 @@ help:
 
 build-backend:
 	@echo "Building backend Docker image..."
-	docker-compose -f docker-compose.backend.yml build
+	docker compose -f docker-compose.backend.yml build
 
 start-backend:
 	@echo "Starting backend server on port 8000..."
 	@echo "Subnet discovery will find this backend automatically"
 	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
-		docker-compose -f docker-compose.backend.yml up -d
+		docker compose -f docker-compose.backend.yml up -d
 	@echo ""
 	@echo "Backend started! Test with:"
 	@echo "  curl http://localhost:8000/health"
 
 stop-backend:
 	@echo "Stopping backend server..."
-	docker-compose -f docker-compose.backend.yml down
+	docker compose -f docker-compose.backend.yml down
 
 logs-backend:
-	docker-compose -f docker-compose.backend.yml logs -f
+	docker compose -f docker-compose.backend.yml logs -f
 
 pull-model:
 	@if [ -z "$(MODEL)" ]; then \
@@ -73,11 +73,11 @@ pull-model:
 		exit 1; \
 	fi
 	@echo "Pulling model: $(MODEL)"
-	docker-compose -f docker-compose.backend.yml exec llama-server llamacpp pull $(MODEL)
+	docker compose -f docker-compose.backend.yml exec llama-server llamacpp pull $(MODEL)
 
 list-models:
 	@echo "Models on this backend:"
-	docker-compose -f docker-compose.backend.yml exec llama-server llamacpp list
+	docker compose -f docker-compose.backend.yml exec llama-server llamacpp list
 
 # ============================================================================
 # Proxy Server (run on ONE proxy machine)
@@ -85,14 +85,14 @@ list-models:
 
 build-proxy:
 	@echo "Building proxy Docker image..."
-	docker-compose -f docker-compose.proxy.yml build
+	docker compose -f docker-compose.proxy.yml build
 
 start-proxy:
 	@echo "Starting lb-proxy with subnet discovery..."
 	@echo "Scanning subnet: $(SUBNET)"
 	@echo "Proxy port: $(PROXY_PORT)"
 	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
-		docker-compose -f docker-compose.proxy.yml up -d
+		docker compose -f docker-compose.proxy.yml up -d
 	@echo ""
 	@echo "Proxy started! Access at:"
 	@echo "  http://localhost:$(PROXY_PORT)/v1/models"
@@ -102,10 +102,10 @@ start-proxy:
 
 stop-proxy:
 	@echo "Stopping lb-proxy..."
-	docker-compose -f docker-compose.proxy.yml down
+	docker compose -f docker-compose.proxy.yml down
 
 logs-proxy:
-	docker-compose -f docker-compose.proxy.yml logs -f
+	docker compose -f docker-compose.proxy.yml logs -f
 
 status-proxy:
 	@echo "Querying proxy backend status..."
@@ -118,16 +118,16 @@ status-proxy:
 
 clean:
 	@echo "Stopping all containers..."
-	docker-compose -f docker-compose.backend.yml down 2>/dev/null || true
-	docker-compose -f docker-compose.proxy.yml down 2>/dev/null || true
+	docker compose -f docker-compose.backend.yml down 2>/dev/null || true
+	docker compose -f docker-compose.proxy.yml down 2>/dev/null || true
 
 clean-volumes:
 	@echo "WARNING: This will delete all models and data!"
 	@read -p "Are you sure? [y/N] " -n 1 -r; \
 	echo; \
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
-		docker-compose -f docker-compose.backend.yml down -v; \
-		docker-compose -f docker-compose.proxy.yml down -v; \
+		docker compose -f docker-compose.backend.yml down -v; \
+		docker compose -f docker-compose.proxy.yml down -v; \
 		echo "Volumes removed"; \
 	else \
 		echo "Cancelled"; \
@@ -166,4 +166,4 @@ test-proxy:
 	@curl -f http://localhost:$(PROXY_PORT)/health && echo " ✓ Proxy healthy" || echo " ✗ Proxy unhealthy"
 	@echo ""
 	@echo "Discovered backends:"
-	@curl -s http://localhost:$(PROXY_PORT)/backends | jq -r '.backends[] | "  - \(.url) (healthy: \(.healthy), models: \(.models | length))"'
+	@curl -s http://localhost:$(PROXY_PORT)/backends | jq -r '.backends[] | "  - \(.url) (healthy: \(.healthy), models: \(.models | length))"' 2>/dev/null || curl -s http://localhost:$(PROXY_PORT)/backends
