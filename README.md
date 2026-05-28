@@ -7,6 +7,7 @@ Ollama-like CLI wrapper around llama.cpp. Provides a simple command-line interfa
 - **pull** - Download GGUF models from Hugging Face
 - **run** - Run models interactively using llama.cpp
 - **serve** - Start the llama.cpp server
+- **lb-proxy** - Multi-backend load balancer proxy (NEW!)
 - **list** - List downloaded models
 - **ps** - Show running llama.cpp processes
 - **rm** - Remove a downloaded model
@@ -66,15 +67,34 @@ The server runs at `http://localhost:8080` with OpenAI-compatible API.
 ## Commands
 
 ```
-llamacpp pull <model>    Download GGUF model from Hugging Face
-llamacpp run <model>     Run a model interactively
-llamacpp serve           Start the llama.cpp server
-llamacpp list            List downloaded models
-llamacpp ps              Show running processes
-llamacpp rm <model>      Remove a model
-llamacpp search <query>   Search for models on Hugging Face
-llamacpp install          Install/update llama.cpp binaries
+llamacpp pull <model>      Download GGUF model from Hugging Face
+llamacpp run <model>       Run a model interactively
+llamacpp serve             Start the llama.cpp server
+llamacpp lb-proxy          Start multi-backend load balancer (see LB_PROXY.md)
+llamacpp list              List downloaded models
+llamacpp ps                Show running processes
+llamacpp rm <model>        Remove a model
+llamacpp search <query>    Search for models on Hugging Face
+llamacpp install           Install/update llama.cpp binaries
 ```
+
+### Load Balancer Proxy
+
+For distributing requests across multiple machines, use the load balancer:
+
+```bash
+# Auto-discover backends on your network
+llamacpp lb-proxy --discover-subnet 192.168.1.0/24
+
+# Or specify backends manually
+llamacpp lb-proxy -b http://machine1:8000 -b http://machine2:8000
+```
+
+See [LB_PROXY.md](LB_PROXY.md) for detailed documentation on:
+- Model-aware routing
+- Least-connections load balancing
+- Auto-discovery and health checks
+- Configuration options
 
 ## Model Names
 

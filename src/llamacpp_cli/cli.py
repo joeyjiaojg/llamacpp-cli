@@ -169,3 +169,77 @@ def show(model: str) -> None:
     from .model_manager import show_model_info
 
     show_model_info(model)
+
+
+@cli.command(name="lb-proxy")
+@click.option("--host", default="127.0.0.1", help="Host to bind.")
+@click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
+@click.option(
+    "--config",
+    "-c",
+    default=None,
+    help="Path to backends config JSON (default: ~/.llamacpp/lb_backends.json).",
+)
+@click.option(
+    "--backend",
+    "-b",
+    multiple=True,
+    help="Backend URL (can be specified multiple times): http://host:port",
+)
+@click.option(
+    "--discover-subnet",
+    default=None,
+    help="Auto-discover backends on subnet (e.g., 192.168.1.0/24).",
+)
+@click.option(
+    "--discover-port",
+    default=8000,
+    type=int,
+    help="Port to scan for backends during discovery.",
+)
+def lb_proxy(
+    host: str,
+    port: int,
+    config: str | None,
+    backend: tuple[str, ...],
+    discover_subnet: str | None,
+    discover_port: int,
+) -> None:
+    """Start a multi-backend load balancer proxy.
+
+    Routes requests to multiple llama-server instances with:
+    - Model-aware routing (different hosts can run different models)
+    - Least-connections load balancing
+    - Auto health checks and backend discovery
+    - Config file auto-reload
+
+    Examples:
+
+        # Manual backends
+        llamacpp lb-proxy -b http://machine1:8000 -b http://machine2:8000
+
+        # Auto-discover on subnet
+        llamacpp lb-proxy --discover-subnet 192.168.1.0/24
+
+        # Use config file (auto-reloads on changes)
+        llamacpp lb-proxy --config ./backends.json
+
+    Config file format (JSON):
+
+        {
+          "backends": [
+            {"host": "192.168.1.10", "port": 8000},
+            {"host": "192.168.1.11", "port": 8000}
+          ]
+        }
+    """
+    from .lb_proxy import run_lb_proxy
+
+    run_lb_proxy(
+        host=host,
+        port=port,
+        config_file=config,
+        backends=list(backend) if backend else None,
+        discover_subnet=discover_subnet,
+        discover_port=discover_port,
+    )
