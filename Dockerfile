@@ -35,8 +35,7 @@ RUN llamacpp install || echo "llama.cpp install failed - will retry at runtime"
 
 # Expose ports
 # 8000: llama.cpp server
-# 8080: load balancer proxy
-EXPOSE 8000 8080
+EXPOSE 8000
 
 # Default command (can be overridden in docker-compose)
 CMD ["llamacpp", "--help"]
