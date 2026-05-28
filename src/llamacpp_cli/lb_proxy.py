@@ -41,6 +41,10 @@ class Backend:
     consecutive_failures: int = 0
     consecutive_successes: int = 0
     checking: bool = False
+    # Token statistics
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_requests: int = 0
 
     @property
     def url(self) -> str:
@@ -355,6 +359,19 @@ async def _forward_request(
 
     body = await request.body()
 
+    # Try to extract prompt tokens from request body
+    prompt_tokens = 0
+    try:
+        request_data = json.loads(body)
+        if "messages" in request_data:
+            # Rough estimate: count tokens in messages
+            for msg in request_data.get("messages", []):
+                content = msg.get("content", "")
+                # Very rough estimate: ~4 chars per token
+                prompt_tokens += len(content) // 4
+    except Exception:
+        pass
+
     _HOP_BY_HOP = {
         "host",
         "connection",
@@ -369,6 +386,7 @@ async def _forward_request(
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
 
     backend.active_requests += 1
+    backend.total_requests += 1
     try:
         backend_resp = await state.http_client.send(
             state.http_client.build_request(
@@ -386,13 +404,38 @@ async def _forward_request(
             if k.lower() not in {"transfer-encoding", "connection"}
         }
 
+        # Collect response body for token counting
+        response_chunks = []
         async def _stream() -> AsyncIterator[bytes]:
             try:
                 async for chunk in backend_resp.aiter_bytes():
+                    response_chunks.append(chunk)
                     yield chunk
             finally:
                 await backend_resp.aclose()
                 backend.active_requests -= 1
+
+                # Try to parse response and extract token usage
+                try:
+                    full_response = b"".join(response_chunks).decode("utf-8")
+                    response_data = json.loads(full_response)
+                    usage = response_data.get("usage", {})
+                    actual_prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                    completion_tokens = usage.get("completion_tokens", 0)
+
+                    backend.total_prompt_tokens += actual_prompt_tokens
+                    backend.total_completion_tokens += completion_tokens
+
+                    print(
+                        f"{_timestamp()} [lb-proxy] {backend.url} - "
+                        f"prompt_tokens: {actual_prompt_tokens}, "
+                        f"completion_tokens: {completion_tokens}",
+                        flush=True
+                    )
+                except Exception:
+                    # If we can't parse, use the estimate
+                    if prompt_tokens > 0:
+                        backend.total_prompt_tokens += prompt_tokens
 
         return StreamingResponse(
             _stream(),
@@ -540,6 +583,39 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 for b in state.backends
             ]
         return JSONResponse({"backends": backends_data})
+
+    @app.get("/stats")
+    @app.get("/v1/stats")
+    async def stats() -> JSONResponse:
+        """Get token usage statistics (no authentication required)."""
+        async with state.get_lock():
+            # Calculate totals
+            total_prompt_tokens = sum(b.total_prompt_tokens for b in state.backends)
+            total_completion_tokens = sum(b.total_completion_tokens for b in state.backends)
+            total_requests = sum(b.total_requests for b in state.backends)
+
+            # Per-backend stats
+            backend_stats = [
+                {
+                    "url": b.url,
+                    "healthy": b.healthy,
+                    "total_requests": b.total_requests,
+                    "total_prompt_tokens": b.total_prompt_tokens,
+                    "total_completion_tokens": b.total_completion_tokens,
+                    "total_tokens": b.total_prompt_tokens + b.total_completion_tokens,
+                }
+                for b in state.backends
+            ]
+
+        return JSONResponse({
+            "total": {
+                "requests": total_requests,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_prompt_tokens + total_completion_tokens,
+            },
+            "backends": backend_stats,
+        })
 
     return app
 
