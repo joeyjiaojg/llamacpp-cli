@@ -58,7 +58,7 @@ class ProxyState:
     backends_lock: asyncio.Lock | None = None  # Created lazily in the correct event loop
     http_client: httpx.AsyncClient = field(
         default_factory=lambda: httpx.AsyncClient(
-            timeout=30.0,
+            timeout=300.0,  # 5 minutes for slow model inference
             limits=httpx.Limits(
                 max_connections=200,  # Up from default 100
                 max_keepalive_connections=50,  # Up from default 20
