@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,300 @@ def _timestamp() -> str:
 
 
 @dataclass
+class RateLimiter:
+    """Rate limiter with per-key request and token quotas.
+
+    Uses sliding window algorithm:
+    - Tracks requests per minute (RPM)
+    - Tracks tokens per hour (TPH)
+    - Falls back to IP-based limiting when no API key provided
+    """
+
+    rpm_limit: int  # Requests per minute
+    tph_limit: int  # Tokens per hour
+
+    # Sliding windows: key -> deque of timestamps
+    _request_windows: dict[str, deque[float]] = field(default_factory=lambda: defaultdict(deque))
+    _token_windows: dict[str, deque[tuple[float, int]]] = field(
+        default_factory=lambda: defaultdict(deque)
+    )
+
+    # Statistics
+    _rate_limit_hits: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    _lock: asyncio.Lock | None = None
+
+    def get_lock(self) -> asyncio.Lock:
+        """Get or create the lock in the current event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _get_key(self, request: Request) -> str:
+        """Extract rate limiting key from request (API key or IP)."""
+        # Try to extract API key from Authorization header
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[7:]  # Remove "Bearer " prefix
+
+        # Fall back to IP address
+        if hasattr(request, "client") and request.client:
+            return f"ip:{request.client.host}"
+
+        return "unknown"
+
+    def _clean_window(self, window: deque, cutoff_time: float) -> None:
+        """Remove entries older than cutoff_time from window."""
+        while window and window[0] < cutoff_time:
+            window.popleft()
+
+    def _clean_token_window(self, window: deque, cutoff_time: float) -> None:
+        """Remove entries older than cutoff_time from token window."""
+        while window and window[0][0] < cutoff_time:
+            window.popleft()
+
+    async def check_rate_limit(self, request: Request) -> tuple[bool, str | None]:
+        """Check if request is within rate limits.
+
+        Returns:
+            (allowed, error_message) - error_message is None if allowed
+        """
+        async with self.get_lock():
+            key = self._get_key(request)
+            now = time.time()
+
+            # Check RPM (requests per minute)
+            rpm_window = self._request_windows[key]
+            rpm_cutoff = now - 60.0  # 60 seconds
+            self._clean_window(rpm_window, rpm_cutoff)
+
+            if len(rpm_window) >= self.rpm_limit:
+                self._rate_limit_hits[key] += 1
+                # Calculate retry_after (seconds until oldest request expires)
+                retry_after = int(rpm_window[0] + 60.0 - now) + 1
+                return False, f"Rate limit exceeded: {self.rpm_limit} requests per minute. Retry after {retry_after} seconds."
+
+            # Check TPH (tokens per hour) - will be updated after response
+            tph_window = self._token_windows[key]
+            tph_cutoff = now - 3600.0  # 3600 seconds = 1 hour
+            self._clean_token_window(tph_window, tph_cutoff)
+
+            current_tokens = sum(tokens for _, tokens in tph_window)
+            if current_tokens >= self.tph_limit:
+                self._rate_limit_hits[key] += 1
+                # Calculate retry_after (seconds until oldest token entry expires)
+                retry_after = int(tph_window[0][0] + 3600.0 - now) + 1
+                return False, f"Token quota exceeded: {self.tph_limit} tokens per hour. Retry after {retry_after} seconds."
+
+            # Add to request window (will be committed)
+            rpm_window.append(now)
+
+            return True, None
+
+    async def record_tokens(self, request: Request, tokens: int) -> None:
+        """Record token usage for a request."""
+        async with self.get_lock():
+            key = self._get_key(request)
+            now = time.time()
+
+            tph_window = self._token_windows[key]
+            tph_window.append((now, tokens))
+
+            # Clean old entries
+            tph_cutoff = now - 3600.0
+            self._clean_token_window(tph_window, tph_cutoff)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get rate limiting statistics."""
+        return {
+            "total_rate_limit_hits": sum(self._rate_limit_hits.values()),
+            "rate_limit_hits_by_key": dict(self._rate_limit_hits),
+            "active_keys": len(self._request_windows),
+        }
+
+
+@dataclass
+class QueuedRequest:
+    """A request waiting in the queue for an available backend."""
+
+    request: Any  # The FastAPI Request object
+    model: str | None
+    future: asyncio.Future = field(default_factory=asyncio.Future)
+    enqueued_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class RequestQueue:
+    """Queue for requests when no backends are available."""
+
+    max_size: int = 100
+    timeout: float = 30.0
+
+    _queue: deque = field(default_factory=deque)
+    wait_times: list = field(default_factory=list)
+    total_queued: int = 0
+    total_timeouts: int = 0
+    total_rejections: int = 0
+
+    def size(self) -> int:
+        return len(self._queue)
+
+    async def enqueue(self, request: Any, model: str | None) -> "QueuedRequest":
+        """Enqueue a request. Raises HTTPException(503) if queue is full."""
+        if self.size() >= self.max_size:
+            if self.wait_times:
+                sorted_times = sorted(self.wait_times)
+                idx = int(50 * len(sorted_times) / 100)
+                est = sorted_times[min(idx, len(sorted_times) - 1)]
+            else:
+                est = 0.0
+            self.total_rejections += 1
+            raise HTTPException(
+                status_code=503,
+                detail=f"Queue full (max {self.max_size}). Estimated wait: {est:.1f}s",
+            )
+        queued = QueuedRequest(request=request, model=model)
+        self._queue.append(queued)
+        self.total_queued += 1
+        return queued
+
+    def dequeue(self) -> "QueuedRequest | None":
+        """Remove and return the next request from the front of the queue."""
+        if self._queue:
+            return self._queue.popleft()
+        return None
+
+    def record_wait_time(self, wait_time: float) -> None:
+        """Record a wait time, keeping only the last 1000 entries."""
+        self.wait_times.append(wait_time)
+        if len(self.wait_times) > 1000:
+            self.wait_times = self.wait_times[-1000:]
+
+    def get_percentiles(self) -> dict:
+        """Return p50, p95, p99 wait time percentiles."""
+        if not self.wait_times:
+            return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+        sorted_times = sorted(self.wait_times)
+        n = len(sorted_times)
+        p50 = sorted_times[int(50 * (n - 1) / 100)]
+        p95 = sorted_times[int(95 * (n - 1) / 100)]
+        p99 = sorted_times[int(99 * (n - 1) / 100)]
+        return {"p50": p50, "p95": p95, "p99": p99}
+
+    def get_stats(self) -> dict:
+        """Return queue statistics."""
+        return {
+            "current_size": self.size(),
+            "total_queued": self.total_queued,
+            "total_timeouts": self.total_timeouts,
+            "total_rejections": self.total_rejections,
+            "wait_times": self.get_percentiles(),
+        }
+
+class CircuitState(Enum):
+    """States for the circuit breaker pattern."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+@dataclass
+class CircuitBreaker:
+    """Circuit breaker to protect backends from cascading failures.
+
+    State machine:
+    - CLOSED: normal operation, requests pass through
+    - OPEN: too many failures, requests are rejected
+    - HALF_OPEN: testing if backend recovered
+    """
+
+    failure_threshold: int = 5
+    success_threshold: int = 2
+    timeout: float = 60.0  # seconds in OPEN before trying HALF_OPEN
+    half_open_timeout: float = 30.0  # seconds in HALF_OPEN before reopening
+
+    state: CircuitState = field(default=CircuitState.CLOSED)
+    failure_count: int = 0
+    success_count: int = 0
+    last_failure_time: float = 0.0
+    last_state_change_time: float = field(default_factory=time.time)
+    total_opens: int = 0
+    total_closes: int = 0
+
+    def can_attempt_request(self) -> bool:
+        """Check if a request should be allowed through."""
+        now = time.time()
+        if self.state == CircuitState.CLOSED:
+            return True
+        elif self.state == CircuitState.OPEN:
+            if now - self.last_failure_time >= self.timeout:
+                self.state = CircuitState.HALF_OPEN
+                self.last_state_change_time = now
+                return True
+            return False
+        else:  # HALF_OPEN
+            if now - self.last_state_change_time >= self.half_open_timeout:
+                self.state = CircuitState.OPEN
+                self.last_failure_time = now
+                return False
+            return True
+
+    def record_failure(self) -> None:
+        """Record a failed request and update state accordingly."""
+        now = time.time()
+        if self.state == CircuitState.CLOSED:
+            self.failure_count += 1
+            self.success_count = 0
+            self.last_failure_time = now
+            if self.failure_count >= self.failure_threshold:
+                self.state = CircuitState.OPEN
+                self.total_opens += 1
+                self.last_state_change_time = now
+        elif self.state == CircuitState.OPEN:
+            self.last_failure_time = now
+        else:  # HALF_OPEN
+            self.state = CircuitState.OPEN
+            self.last_failure_time = now
+            self.failure_count = 1
+            self.success_count = 0
+            self.last_state_change_time = now
+
+    def record_success(self) -> None:
+        """Record a successful request and update state accordingly."""
+        if self.state == CircuitState.CLOSED:
+            self.success_count += 1
+            self.failure_count = 0
+        elif self.state == CircuitState.HALF_OPEN:
+            self.success_count += 1
+            if self.success_count >= self.success_threshold:
+                self.state = CircuitState.CLOSED
+                self.total_closes += 1
+                self.failure_count = 0
+                self.success_count = 0
+        # OPEN: no-op
+
+    def get_state_info(self) -> dict:
+        """Return comprehensive circuit breaker state info."""
+        now = time.time()
+        info: dict = {
+            "state": self.state.value,
+            "failure_count": self.failure_count,
+            "success_count": self.success_count,
+            "total_opens": self.total_opens,
+            "total_closes": self.total_closes,
+            "seconds_until_retry": None,
+            "seconds_since_last_failure": None,
+        }
+        if self.last_failure_time > 0:
+            info["seconds_since_last_failure"] = now - self.last_failure_time
+        if self.state == CircuitState.OPEN:
+            remaining = self.timeout - (now - self.last_failure_time)
+            info["seconds_until_retry"] = max(0.0, remaining)
+        return info
+
+
+
+@dataclass
 class Backend:
     """A backend llama-server instance."""
 
@@ -41,6 +337,7 @@ class Backend:
     consecutive_failures: int = 0
     consecutive_successes: int = 0
     checking: bool = False
+    circuit_breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
     # Token statistics
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
@@ -77,6 +374,10 @@ class ProxyState:
     config_watch_task: asyncio.Task | None = None
     auth_key: str | None = None  # Optional authentication key for backend discovery
     api_key: str | None = None  # Optional API key for client requests
+    rate_limiter: RateLimiter | None = None  # Optional rate limiter
+    max_request_size: int = 10 * 1024 * 1024  # Maximum request body size (10MB)
+    max_response_tokens: int = 32000  # Maximum response tokens
+    request_queue: RequestQueue | None = None  # Optional request queue
 
     def get_lock(self) -> asyncio.Lock:
         """Get or create the backends lock in the current event loop."""
@@ -98,10 +399,7 @@ class ProxyState:
 
 
 async def _check_backend_health(
-    backend: Backend,
-    client: httpx.AsyncClient,
-    auth_key: str | None = None,
-    verbose: bool = False
+    backend: Backend, client: httpx.AsyncClient, auth_key: str | None = None, verbose: bool = False
 ) -> bool:
     """Check if a backend is healthy and is a valid llama-server instance.
 
@@ -122,7 +420,10 @@ async def _check_backend_health(
                 data = resp.json()
             except Exception as e:
                 if verbose:
-                    print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: JSON parse error - {e}", flush=True)
+                    print(
+                        f"{_timestamp()} [lb-proxy] {backend.url} rejected: JSON parse error - {e}",
+                        flush=True,
+                    )
                 return False
 
             # Validate OpenAI-compatible response format
@@ -132,18 +433,30 @@ async def _check_backend_health(
                     backend_key = resp.headers.get("Authorization")
                     if backend_key and backend_key != f"Bearer {auth_key}":
                         if verbose:
-                            print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: auth key mismatch", flush=True)
+                            print(
+                                f"{_timestamp()} [lb-proxy] {backend.url} rejected: auth key mismatch",
+                                flush=True,
+                            )
                         return False
                 return True
             else:
                 if verbose:
-                    print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: invalid format - data={type(data)}, has_data={'data' in data if isinstance(data, dict) else False}", flush=True)
+                    print(
+                        f"{_timestamp()} [lb-proxy] {backend.url} rejected: invalid format - data={type(data)}, has_data={'data' in data if isinstance(data, dict) else False}",
+                        flush=True,
+                    )
         else:
             if verbose:
-                print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: status {resp.status_code}", flush=True)
+                print(
+                    f"{_timestamp()} [lb-proxy] {backend.url} rejected: status {resp.status_code}",
+                    flush=True,
+                )
     except Exception as e:
         if verbose:
-            print(f"{_timestamp()} [lb-proxy] {backend.url} rejected: {type(e).__name__}: {e}", flush=True)
+            print(
+                f"{_timestamp()} [lb-proxy] {backend.url} rejected: {type(e).__name__}: {e}",
+                flush=True,
+            )
 
     return False
 
@@ -182,7 +495,10 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
             for backend in state.backends:
                 # Skip if already checking or too soon
                 now = time.time()
-                if backend.checking or now - backend.last_health_check < state.health_check_interval:
+                if (
+                    backend.checking
+                    or now - backend.last_health_check < state.health_check_interval
+                ):
                     continue
 
                 # Prevent concurrent checks
@@ -195,13 +511,19 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
                     if healthy:
                         backend.consecutive_successes += 1
                         backend.consecutive_failures = 0
+                        backend.circuit_breaker.record_success()
                     else:
                         backend.consecutive_failures += 1
                         backend.consecutive_successes = 0
+                        backend.circuit_breaker.record_failure()
 
                     # Only change healthy status after thresholds are met
-                    should_mark_healthy = not backend.healthy and backend.consecutive_successes >= SUCCESS_THRESHOLD
-                    should_mark_unhealthy = backend.healthy and backend.consecutive_failures >= FAILURE_THRESHOLD
+                    should_mark_healthy = (
+                        not backend.healthy and backend.consecutive_successes >= SUCCESS_THRESHOLD
+                    )
+                    should_mark_unhealthy = (
+                        backend.healthy and backend.consecutive_failures >= FAILURE_THRESHOLD
+                    )
 
                     if should_mark_healthy:
                         backend.healthy = True
@@ -209,14 +531,14 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
                         print(
                             f"{_timestamp()} [lb-proxy] Backend {backend.url} became healthy "
                             f"(after {backend.consecutive_successes} consecutive successes), models: {backend.models}",
-                            flush=True
+                            flush=True,
                         )
                     elif should_mark_unhealthy:
                         backend.healthy = False
                         print(
                             f"{_timestamp()} [lb-proxy] Backend {backend.url} became unhealthy "
                             f"(after {backend.consecutive_failures} consecutive failures)",
-                            flush=True
+                            flush=True,
                         )
                     elif backend.healthy:
                         # Refresh models silently if still healthy
@@ -283,9 +605,7 @@ async def _load_backends_from_config(state: ProxyState, auth_key: str | None = N
             # Remove deleted backends
             removed = existing - new
             if removed:
-                state.backends = [
-                    b for b in state.backends if (b.host, b.port) not in removed
-                ]
+                state.backends = [b for b in state.backends if (b.host, b.port) not in removed]
                 for host, port in removed:
                     print(f"{_timestamp()} [lb-proxy] Removed backend: http://{host}:{port}")
 
@@ -293,9 +613,7 @@ async def _load_backends_from_config(state: ProxyState, auth_key: str | None = N
         print(f"{_timestamp()} [lb-proxy] Error loading config: {exc}")
 
 
-async def _discover_backends_on_subnet(
-    state: ProxyState, subnet: str, port: int
-) -> None:
+async def _discover_backends_on_subnet(state: ProxyState, subnet: str, port: int) -> None:
     """Scan a subnet for llama-server instances on a given port."""
     import ipaddress
 
@@ -328,12 +646,12 @@ async def _discover_backends_on_subnet(
                 if any(b.host == result.host and b.port == result.port for b in state.backends):
                     continue
                 state.backends.append(result)
-                print(f"{_timestamp()} [lb-proxy] Discovered backend: {result.url}, models: {result.models}")
+                print(
+                    f"{_timestamp()} [lb-proxy] Discovered backend: {result.url}, models: {result.models}"
+                )
 
 
-def _select_backend(
-    backends: list[Backend], model: str | None = None
-) -> Backend | None:
+def _select_backend(backends: list[Backend], model: str | None = None) -> Backend | None:
     """Select the best backend using model-aware + least-connections routing."""
     healthy = [b for b in backends if b.healthy]
     if not healthy:
@@ -349,9 +667,51 @@ def _select_backend(
     return min(healthy, key=lambda b: b.active_requests)
 
 
-async def _forward_request(
-    request: Request, backend: Backend, state: ProxyState
-) -> Response:
+async def _check_request_size(request: Request, max_size: int) -> None:
+    """Check if request size is within limits.
+
+    Raises HTTPException(413) if request is too large.
+    Handles both Content-Length header and chunked transfer encoding.
+    """
+    # Check Content-Length header if present
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            size = int(content_length)
+            if size > max_size:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Request body too large: {size} bytes (max: {max_size} bytes = {max_size / (1024 * 1024):.1f}MB)",
+                )
+        except ValueError:
+            pass  # Invalid Content-Length, will check during body read
+
+    # For chunked transfer encoding or missing Content-Length, we'll check during body read
+    # This is handled by FastAPI's request.body() which respects the size limit
+
+
+async def _enforce_max_tokens(body_bytes: bytes, max_tokens: int) -> bytes:
+    """Enforce max_tokens limit in request body.
+
+    If request contains max_tokens > limit, override it.
+    Returns modified body bytes.
+    """
+    try:
+        request_data = json.loads(body_bytes)
+        if isinstance(request_data, dict):
+            # Check if max_tokens exceeds limit
+            if "max_tokens" in request_data:
+                requested_tokens = request_data["max_tokens"]
+                if requested_tokens > max_tokens:
+                    request_data["max_tokens"] = max_tokens
+                    return json.dumps(request_data).encode()
+    except Exception:
+        pass  # Not JSON or parsing error, return original body
+
+    return body_bytes
+
+
+async def _forward_request(request: Request, backend: Backend, state: ProxyState) -> Response:
     """Forward request to a backend and stream back the response."""
     url = f"{backend.url}{request.url.path}"
     if request.url.query:
@@ -385,6 +745,9 @@ async def _forward_request(
     }
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
 
+    if not backend.circuit_breaker.can_attempt_request():
+        raise HTTPException(status_code=503, detail=f"Circuit breaker open for backend {backend.url}")
+
     backend.active_requests += 1
     backend.total_requests += 1
     try:
@@ -406,6 +769,7 @@ async def _forward_request(
 
         # Collect response body for token counting
         response_chunks = []
+
         async def _stream() -> AsyncIterator[bytes]:
             try:
                 async for chunk in backend_resp.aiter_bytes():
@@ -416,6 +780,7 @@ async def _forward_request(
                 backend.active_requests -= 1
 
                 # Try to parse response and extract token usage
+                total_tokens = 0
                 try:
                     full_response = b"".join(response_chunks).decode("utf-8")
 
@@ -444,17 +809,19 @@ async def _forward_request(
 
                             backend.total_prompt_tokens += actual_prompt_tokens
                             backend.total_completion_tokens += completion_tokens
+                            total_tokens = actual_prompt_tokens + completion_tokens
 
                             print(
                                 f"{_timestamp()} [lb-proxy] {backend.url} - "
                                 f"prompt_tokens: {actual_prompt_tokens}, "
                                 f"completion_tokens: {completion_tokens}",
-                                flush=True
+                                flush=True,
                             )
                         else:
                             # No usage found in SSE, use estimate
                             if prompt_tokens > 0:
                                 backend.total_prompt_tokens += prompt_tokens
+                                total_tokens = prompt_tokens
                     else:
                         # Non-streaming JSON response
                         response_data = json.loads(full_response)
@@ -464,19 +831,26 @@ async def _forward_request(
 
                         backend.total_prompt_tokens += actual_prompt_tokens
                         backend.total_completion_tokens += completion_tokens
+                        total_tokens = actual_prompt_tokens + completion_tokens
 
                         print(
                             f"{_timestamp()} [lb-proxy] {backend.url} - "
                             f"prompt_tokens: {actual_prompt_tokens}, "
                             f"completion_tokens: {completion_tokens}",
-                            flush=True
+                            flush=True,
                         )
                 except Exception as e:
                     # If we can't parse, use the estimate
                     print(f"{_timestamp()} [lb-proxy] Failed to parse token usage: {e}", flush=True)
                     if prompt_tokens > 0:
                         backend.total_prompt_tokens += prompt_tokens
+                        total_tokens = prompt_tokens
 
+                # Record tokens in rate limiter
+                if state.rate_limiter and total_tokens > 0:
+                    await state.rate_limiter.record_tokens(request, total_tokens)
+
+        backend.circuit_breaker.record_success()
         return StreamingResponse(
             _stream(),
             status_code=backend_resp.status_code,
@@ -485,7 +859,50 @@ async def _forward_request(
         )
     except Exception as exc:
         backend.active_requests -= 1
+        backend.circuit_breaker.record_failure()
         raise HTTPException(status_code=502, detail=f"Backend error: {exc}")
+
+
+async def _queue_worker_loop(state: ProxyState) -> None:
+    """Background worker that drains the request queue."""
+    while True:
+        if state.request_queue and state.request_queue.size() > 0:
+            queued = state.request_queue.dequeue()
+            if queued:
+                # Check if timed out
+                wait_so_far = time.time() - queued.enqueued_at
+                if wait_so_far > state.request_queue.timeout:
+                    state.request_queue.total_timeouts += 1
+                    state.request_queue.record_wait_time(wait_so_far)
+                    if not queued.future.done():
+                        queued.future.set_exception(
+                            HTTPException(status_code=504, detail="Request timed out in queue")
+                        )
+                    continue
+
+                # Find available backend
+                async with state.get_lock():
+                    backend = _select_backend(state.backends, queued.model)
+
+                if backend:
+                    # Record wait time
+                    wait_time = time.time() - queued.enqueued_at
+                    state.request_queue.record_wait_time(wait_time)
+
+                    # Process request
+                    try:
+                        response = await _forward_request(queued.request, backend, state)
+                        if not queued.future.done():
+                            queued.future.set_result(response)
+                    except Exception as e:
+                        if not queued.future.done():
+                            queued.future.set_exception(e)
+                else:
+                    # Put back at front of queue
+                    state.request_queue._queue.appendleft(queued)
+                    await asyncio.sleep(0.1)
+        else:
+            await asyncio.sleep(0.05)
 
 
 def create_lb_app(state: ProxyState) -> FastAPI:
@@ -495,12 +912,17 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         state.health_check_task = asyncio.create_task(_health_check_loop(state, state.auth_key))
         if state.config_path:
             state.config_watch_task = asyncio.create_task(_config_watch_loop(state, state.auth_key))
+        queue_worker_task = None
+        if state.request_queue:
+            queue_worker_task = asyncio.create_task(_queue_worker_loop(state))
         yield
         # Shutdown
         if state.health_check_task:
             state.health_check_task.cancel()
         if state.config_watch_task:
             state.config_watch_task.cancel()
+        if queue_worker_task:
+            queue_worker_task.cancel()
 
     app = FastAPI(title="llamacpp-lb-proxy", lifespan=lifespan)
 
@@ -525,13 +947,21 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             backend = _select_backend(state.backends, model)
 
         if not backend:
+            if state.request_queue:
+                queued = await state.request_queue.enqueue(request, model)
+                return await asyncio.wait_for(queued.future, timeout=state.request_queue.timeout)
             raise HTTPException(
                 status_code=503,
-                detail="No healthy backends available" if not model else f"No backends available for model '{model}'",
+                detail="No healthy backends available"
+                if not model
+                else f"No backends available for model '{model}'",
             )
 
         # Log which backend is handling the request
-        print(f"{_timestamp()} [lb-proxy] Forwarding /v1/chat/completions to {backend.url}", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Forwarding /v1/chat/completions to {backend.url}",
+            flush=True,
+        )
 
         # Forward request
         return await _forward_request(request, backend, state)
@@ -561,13 +991,20 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             backend = _select_backend(state.backends, model)
 
         if not backend:
+            if state.request_queue:
+                queued = await state.request_queue.enqueue(request, model)
+                return await asyncio.wait_for(queued.future, timeout=state.request_queue.timeout)
             raise HTTPException(
                 status_code=503,
-                detail="No healthy backends available" if not model else f"No backends available for model '{model}'",
+                detail="No healthy backends available"
+                if not model
+                else f"No backends available for model '{model}'",
             )
 
         # Log which backend is handling the request
-        print(f"{_timestamp()} [lb-proxy] Forwarding {request.url.path} to {backend.url}", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Forwarding {request.url.path} to {backend.url}", flush=True
+        )
 
         # Forward request
         return await _forward_request(request, backend, state)
@@ -677,12 +1114,14 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         if engine_id not in models_set:
             raise HTTPException(status_code=404, detail=f"Engine '{engine_id}' not found")
 
-        return JSONResponse({
-            "id": engine_id,
-            "object": "engine",
-            "owner": "llamacpp",
-            "ready": True,
-        })
+        return JSONResponse(
+            {
+                "id": engine_id,
+                "object": "engine",
+                "owner": "llamacpp",
+                "ready": True,
+            }
+        )
 
     @app.post("/v1/engines/{engine_id}/completions")
     async def engine_completions(engine_id: str, request: Request) -> Response:
@@ -704,7 +1143,10 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 detail=f"No backends available for engine '{engine_id}'",
             )
 
-        print(f"{_timestamp()} [lb-proxy] Forwarding legacy /v1/engines/{engine_id}/completions to {backend.url}/v1/completions", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Forwarding legacy /v1/engines/{engine_id}/completions to {backend.url}/v1/completions",
+            flush=True,
+        )
 
         # Rewrite the request to /v1/completions with model parameter
         body = await request.body()
@@ -717,7 +1159,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
         # Build new request
         url = f"{backend.url}/v1/completions"
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in {"host", "content-length"}}
+        headers = {
+            k: v for k, v in request.headers.items() if k.lower() not in {"host", "content-length"}
+        }
 
         backend.active_requests += 1
         backend.total_requests += 1
@@ -913,10 +1357,12 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             healthy_count = sum(1 for b in state.backends if b.healthy)
             total_count = len(state.backends)
 
-        return JSONResponse({
-            "status": "ok" if healthy_count > 0 else "degraded",
-            "backends": {"healthy": healthy_count, "total": total_count},
-        })
+        return JSONResponse(
+            {
+                "status": "ok" if healthy_count > 0 else "degraded",
+                "backends": {"healthy": healthy_count, "total": total_count},
+            }
+        )
 
     @app.get("/backends")
     @app.get("/v1/backends")
@@ -974,6 +1420,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             },
             "backends": backend_stats,
         }
+
+        if state.request_queue:
+            stats_data["queue"] = state.request_queue.get_stats()
 
         # Return JSON if format=json is specified
         if format == "json":
@@ -1156,9 +1605,10 @@ def run_lb_proxy(
     backends: list[str] | None = None,
     auth_key: str | None = None,
     api_key: str | None = None,
+    rate_limit_rpm: int = 60,
+    rate_limit_tph: int = 1000000,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
-    import secrets
     import socket
     import sys
 
@@ -1167,16 +1617,29 @@ def run_lb_proxy(
     # Auth is opt-in: only use if explicitly provided
     # Don't auto-generate - makes discovery impossible
     if auth_key:
-        print(f"{_timestamp()} [lb-proxy] Authentication enabled (key: {auth_key[:8]}...)", flush=True)
-        print(f"{_timestamp()} [lb-proxy] Backends must include: Authorization: Bearer {auth_key}", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Authentication enabled (key: {auth_key[:8]}...)", flush=True
+        )
+        print(
+            f"{_timestamp()} [lb-proxy] Backends must include: Authorization: Bearer {auth_key}",
+            flush=True,
+        )
     else:
-        print(f"{_timestamp()} [lb-proxy] Authentication disabled - all backends will be discovered", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Authentication disabled - all backends will be discovered",
+            flush=True,
+        )
         print(f"{_timestamp()} [lb-proxy] Use --auth-key to enable authentication", flush=True)
 
     # API key for client requests
     if api_key:
-        print(f"{_timestamp()} [lb-proxy] Client API key required (key: {api_key[:8]}...)", flush=True)
-        print(f"{_timestamp()} [lb-proxy] Clients must provide: Authorization: Bearer {api_key}", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Client API key required (key: {api_key[:8]}...)", flush=True
+        )
+        print(
+            f"{_timestamp()} [lb-proxy] Clients must provide: Authorization: Bearer {api_key}",
+            flush=True,
+        )
     else:
         print(f"{_timestamp()} [lb-proxy] No API key required for clients", flush=True)
 
@@ -1237,16 +1700,23 @@ def run_lb_proxy(
     discover_tasks = []
     if discover_subnet:
         subnets = [s.strip() for s in discover_subnet.split(",")]
-        print(f"{_timestamp()} [lb-proxy] Starting background discovery for {len(subnets)} subnet(s)...", flush=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Starting background discovery for {len(subnets)} subnet(s)...",
+            flush=True,
+        )
 
         async def _discover_and_check(subnet: str) -> None:
             """Discover backends on a subnet in the background."""
             # Create a new httpx client for this thread (httpx clients are not thread-safe)
             async with httpx.AsyncClient(timeout=5.0) as client:
-                print(f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port {discover_port}…", flush=True)
+                print(
+                    f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port {discover_port}…",
+                    flush=True,
+                )
 
                 # Modified version of _discover_backends_on_subnet that uses local client
                 import ipaddress
+
                 try:
                     network = ipaddress.ip_network(subnet, strict=False)
                 except ValueError as exc:
@@ -1254,6 +1724,7 @@ def run_lb_proxy(
                     return
 
                 tasks = []
+
                 async def _try_host(host: str) -> Backend | None:
                     backend = Backend(host=host, port=discover_port)
                     if await _check_backend_health(backend, client, auth_key, verbose=False):
@@ -1271,10 +1742,16 @@ def run_lb_proxy(
                     for result in results:
                         if isinstance(result, Backend):
                             # Check if already exists
-                            if any(b.host == result.host and b.port == result.port for b in state.backends):
+                            if any(
+                                b.host == result.host and b.port == result.port
+                                for b in state.backends
+                            ):
                                 continue
                             state.backends.append(result)
-                            print(f"{_timestamp()} [lb-proxy] Discovered backend: {result.url}, models: {result.models}", flush=True)
+                            print(
+                                f"{_timestamp()} [lb-proxy] Discovered backend: {result.url}, models: {result.models}",
+                                flush=True,
+                            )
 
                 print(f"{_timestamp()} [lb-proxy] Completed scan of {subnet}", flush=True)
 
@@ -1289,7 +1766,10 @@ def run_lb_proxy(
             backend.last_health_check = time.time()
             if healthy:
                 await _refresh_backend_models(backend, state.http_client, auth_key)
-                print(f"{_timestamp()} [lb-proxy] Backend {backend.url} ready, models: {backend.models}", flush=True)
+                print(
+                    f"{_timestamp()} [lb-proxy] Backend {backend.url} ready, models: {backend.models}",
+                    flush=True,
+                )
             else:
                 print(f"{_timestamp()} [lb-proxy] Backend {backend.url} unhealthy", flush=True)
 
@@ -1297,7 +1777,10 @@ def run_lb_proxy(
 
     print(f"\n{_timestamp()} llamacpp load-balancer proxy listening on {host}:{port}", flush=True)
     print(f"{_timestamp()} Config: {state.config_path}", flush=True)
-    print(f"{_timestamp()} Backends: {len([b for b in state.backends if b.healthy])}/{len(state.backends)} healthy", flush=True)
+    print(
+        f"{_timestamp()} Backends: {len([b for b in state.backends if b.healthy])}/{len(state.backends)} healthy",
+        flush=True,
+    )
     if discover_subnet:
         print(f"{_timestamp()} Discovery running in background for: {discover_subnet}", flush=True)
 
