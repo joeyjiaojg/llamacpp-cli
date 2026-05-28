@@ -62,7 +62,27 @@ llamacpp run gemma3:270m
 llamacpp serve -m gemma3:270m
 ```
 
-The server runs at `http://localhost:8080` with OpenAI-compatible API.
+The server runs at `http://0.0.0.0:8080` with OpenAI-compatible API.
+
+#### CPU-Optimized Presets
+
+For CPU-only servers, use presets optimized for different workloads:
+
+```bash
+# Code tasks (default): 16K context, 2-4 parallel requests
+llamacpp serve --preset code
+
+# Chat/conversational: 8K context, 4-6 parallel requests
+llamacpp serve --preset chat
+
+# Fast queries: 4K context, 6-8 parallel requests
+llamacpp serve --preset fast
+
+# Large codebases: 32K context, 1 parallel request (slower)
+llamacpp serve --preset max-context
+```
+
+See [CPU_OPTIMIZATION.md](docs/CPU_OPTIMIZATION.md) for detailed tuning guide.
 
 ## Commands
 
