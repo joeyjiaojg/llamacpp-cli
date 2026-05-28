@@ -197,6 +197,11 @@ def show(model: str) -> None:
     type=int,
     help="Port to scan for backends during discovery.",
 )
+@click.option(
+    "--auth-key",
+    default=None,
+    help="Optional authentication key - only backends with matching key will be added.",
+)
 def lb_proxy(
     host: str,
     port: int,
@@ -204,6 +209,7 @@ def lb_proxy(
     backend: tuple[str, ...],
     discover_subnet: str | None,
     discover_port: int,
+    auth_key: str | None,
 ) -> None:
     """Start a multi-backend load balancer proxy.
 
@@ -223,6 +229,9 @@ def lb_proxy(
 
         # Auto-discover on multiple subnets (comma-separated)
         llamacpp lb-proxy --discover-subnet 10.231.213.0/24,10.231.214.0/24,10.231.215.0/24
+
+        # With authentication key (only backends with matching key will join)
+        llamacpp lb-proxy --discover-subnet 192.168.1.0/24 --auth-key my-secret-key
 
         # Use config file (auto-reloads on changes)
         llamacpp lb-proxy --config ./backends.json
@@ -245,4 +254,5 @@ def lb_proxy(
         backends=list(backend) if backend else None,
         discover_subnet=discover_subnet,
         discover_port=discover_port,
+        auth_key=auth_key,
     )

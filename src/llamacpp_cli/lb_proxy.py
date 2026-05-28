@@ -52,6 +52,7 @@ class ProxyState:
     health_check_task: asyncio.Task | None = None
     config_path: Path | None = None
     config_watch_task: asyncio.Task | None = None
+    auth_key: str | None = None  # Optional authentication key for backend discovery
 
     def get_lock(self) -> asyncio.Lock:
         """Get or create the backends lock in the current event loop."""
@@ -60,22 +61,39 @@ class ProxyState:
         return self.backends_lock
 
 
-async def _check_backend_health(backend: Backend, client: httpx.AsyncClient) -> bool:
-    """Check if a backend is healthy by querying /health or /v1/models."""
+async def _check_backend_health(
+    backend: Backend,
+    client: httpx.AsyncClient,
+    auth_key: str | None = None
+) -> bool:
+    """Check if a backend is healthy and is a valid llama-server instance.
+
+    Validates:
+    1. Endpoint responds
+    2. Returns OpenAI-compatible /v1/models format (validates it's llama-server)
+    3. Optional auth key matches (if provided)
+    """
+    headers = {}
+    if auth_key:
+        headers["X-LB-Auth-Key"] = auth_key
+
     try:
-        # Try /health first
-        resp = await client.get(f"{backend.url}/health", timeout=5.0)
+        # Check /v1/models to validate it's an OpenAI-compatible server
+        resp = await client.get(f"{backend.url}/v1/models", headers=headers, timeout=5.0)
         if resp.status_code == 200:
-            return True
+            data = resp.json()
+            # Validate OpenAI-compatible response format
+            if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                # Check auth key if backend sends it back
+                if auth_key:
+                    backend_key = resp.headers.get("X-LB-Auth-Key")
+                    if backend_key != auth_key:
+                        return False
+                return True
     except Exception:
         pass
 
-    try:
-        # Fall back to /v1/models
-        resp = await client.get(f"{backend.url}/v1/models", timeout=5.0)
-        return resp.status_code == 200
-    except Exception:
-        return False
+    return False
 
 
 async def _refresh_backend_models(backend: Backend, client: httpx.AsyncClient) -> None:
@@ -90,7 +108,7 @@ async def _refresh_backend_models(backend: Backend, client: httpx.AsyncClient) -
         pass
 
 
-async def _health_check_loop(state: ProxyState) -> None:
+async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> None:
     """Periodically check backend health and refresh model lists."""
     while True:
         await asyncio.sleep(state.health_check_interval)
@@ -100,18 +118,24 @@ async def _health_check_loop(state: ProxyState) -> None:
                 if now - backend.last_health_check < state.health_check_interval:
                     continue
 
-                healthy = await _check_backend_health(backend, state.http_client)
+                previous_healthy = backend.healthy
+                healthy = await _check_backend_health(backend, state.http_client, auth_key)
                 backend.healthy = healthy
                 backend.last_health_check = now
 
-                if healthy:
+                # Only log if status changed
+                if healthy != previous_healthy:
+                    if healthy:
+                        await _refresh_backend_models(backend, state.http_client)
+                        print(f"[lb-proxy] Backend {backend.url} became healthy, models: {backend.models}", flush=True)
+                    else:
+                        print(f"[lb-proxy] Backend {backend.url} became unhealthy", flush=True)
+                elif healthy:
+                    # Refresh models silently if still healthy
                     await _refresh_backend_models(backend, state.http_client)
-                    print(f"[lb-proxy] Backend {backend.url} healthy, models: {backend.models}")
-                else:
-                    print(f"[lb-proxy] Backend {backend.url} unhealthy")
 
 
-async def _config_watch_loop(state: ProxyState) -> None:
+async def _config_watch_loop(state: ProxyState, auth_key: str | None = None) -> None:
     """Watch config file for changes and auto-reload backends."""
     if not state.config_path or not state.config_path.exists():
         return
@@ -160,7 +184,7 @@ async def _load_backends_from_config(state: ProxyState) -> None:
                     state.backends.append(backend)
                     print(f"[lb-proxy] Added backend: {backend.url}")
                     # Trigger immediate health check
-                    healthy = await _check_backend_health(backend, state.http_client)
+                    healthy = await _check_backend_health(backend, state.http_client, auth_key)
                     backend.healthy = healthy
                     backend.last_health_check = time.time()
                     if healthy:
@@ -299,9 +323,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001
         # Start background tasks
-        state.health_check_task = asyncio.create_task(_health_check_loop(state))
+        state.health_check_task = asyncio.create_task(_health_check_loop(state, state.auth_key))
         if state.config_path:
-            state.config_watch_task = asyncio.create_task(_config_watch_loop(state))
+            state.config_watch_task = asyncio.create_task(_config_watch_loop(state, state.auth_key))
         yield
         # Shutdown
         if state.health_check_task:
@@ -381,12 +405,16 @@ def run_lb_proxy(
     discover_subnet: str | None = None,
     discover_port: int = 8000,
     backends: list[str] | None = None,
+    auth_key: str | None = None,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
     import socket
     import sys
 
     import uvicorn
+
+    if auth_key:
+        print(f"[lb-proxy] Authentication enabled (key: {auth_key[:4]}...)", flush=True)
 
     # Check port availability
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
@@ -402,6 +430,7 @@ def run_lb_proxy(
 
     # Setup state
     state = ProxyState()
+    state.auth_key = auth_key
 
     # Load config file
     if config_file:
@@ -462,7 +491,7 @@ def run_lb_proxy(
                 tasks = []
                 async def _try_host(host: str) -> Backend | None:
                     backend = Backend(host=host, port=discover_port)
-                    if await _check_backend_health(backend, client):
+                    if await _check_backend_health(backend, client, auth_key):
                         await _refresh_backend_models(backend, client)
                         backend.last_health_check = time.time()
                         return backend
@@ -490,7 +519,7 @@ def run_lb_proxy(
     # Initial health check for any pre-configured backends
     async def _initial_checks() -> None:
         for backend in state.backends:
-            healthy = await _check_backend_health(backend, state.http_client)
+            healthy = await _check_backend_health(backend, state.http_client, auth_key)
             backend.healthy = healthy
             backend.last_health_check = time.time()
             if healthy:
