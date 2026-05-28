@@ -8,6 +8,10 @@
 MODEL ?=
 MODEL_ARGS ?=
 
+# Default subnet for proxy discovery (override with: make start-proxy SUBNET=10.0.0.0/24)
+SUBNET ?= 192.168.1.0/24
+PROXY_PORT ?= 8080
+
 help:
 	@echo "llamacpp-cli Docker Management"
 	@echo ""
