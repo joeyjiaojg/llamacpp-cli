@@ -173,6 +173,15 @@ def ensure_llamacpp() -> bool:
         pass
 
     print("llama.cpp not found.")
+
+    # Non-interactive mode (e.g., in Docker, CI/CD)
+    auto_install = os.environ.get("LLAMACPP_AUTO_INSTALL", "").lower() in ("1", "true", "yes", "y")
+
+    if auto_install:
+        print("Auto-installing (LLAMACPP_AUTO_INSTALL is set)...")
+        return install_llamacpp()
+
+    # Interactive mode
     answer = input("Would you like to install it automatically? [Y/n] ").strip().lower()
     if answer in ("", "y", "yes"):
         return install_llamacpp()

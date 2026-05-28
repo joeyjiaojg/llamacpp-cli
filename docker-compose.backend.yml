@@ -14,6 +14,7 @@ services:
       - "8000:8000"  # Expose on host network for lb-proxy to discover
     environment:
       - LLAMACPP_HOME=/data/llamacpp/.llamacpp
+      - LLAMACPP_AUTO_INSTALL=true
       # Optional: disable SSL verification for Hugging Face downloads behind proxy
       # - LLAMACPP_SSL_VERIFY=false
       # Optional: GitHub token to avoid API rate limits during install

@@ -237,6 +237,7 @@ Available variables:
 | `MODEL` | - | Model name for `pull-model` |
 | `MODEL_ARGS` | - | Extra args for `llamacpp serve` |
 | `GITHUB_TOKEN` | - | GitHub token to bypass API rate limits |
+| `LLAMACPP_AUTO_INSTALL` | `true` | Auto-install llama.cpp without prompts (Docker default) |
 
 ### Docker Compose Variables
 
@@ -380,7 +381,29 @@ ufw allow 8080/tcp
 
 ## Troubleshooting
 
-### Problem: GitHub API rate limit during build
+### Problem: Container hangs with "Would you like to install it automatically? [Y/n]"
+
+**Symptoms:**
+```
+llama.cpp not found.
+Would you like to install it automatically? [Y/n]
+```
+Container is unresponsive, port 8000 not accessible.
+
+**Cause:** Interactive prompt but Docker doesn't forward stdin by default.
+
+**Solution:** Set `LLAMACPP_AUTO_INSTALL=true` (already set by default in docker-compose.backend.yml)
+
+**Verification:**
+```bash
+docker compose -f docker-compose.backend.yml config | grep LLAMACPP_AUTO_INSTALL
+# Should show: LLAMACPP_AUTO_INSTALL=true
+```
+
+If you need to override:
+```bash
+LLAMACPP_AUTO_INSTALL=true make start-backend
+```
 
 **Symptoms:**
 ```
