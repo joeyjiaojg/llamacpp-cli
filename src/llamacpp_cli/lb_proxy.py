@@ -397,8 +397,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         })
 
     @app.get("/backends")
+    @app.get("/v1/backends")
     async def list_backends() -> JSONResponse:
-        """List all backends and their status."""
+        """List all backends and their status (load-aware)."""
         async with state.get_lock():
             backends_data = [
                 {
@@ -406,6 +407,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                     "healthy": b.healthy,
                     "models": b.models,
                     "active_requests": b.active_requests,
+                    "load_status": "busy" if b.active_requests > 0 else "idle",
                 }
                 for b in state.backends
             ]
