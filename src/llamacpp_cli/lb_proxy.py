@@ -538,8 +538,10 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
     @app.post("/v1/completions")
     @app.post("/v1/embeddings")
-    async def other_endpoints(request: Request) -> Response:
-        """Handle other OpenAI endpoints (completions, embeddings, etc.)."""
+    @app.post("/v1/tokenize")
+    @app.post("/v1/detokenize")
+    async def other_post_endpoints(request: Request) -> Response:
+        """Handle other OpenAI POST endpoints (completions, embeddings, tokenization, etc.)."""
         # Validate API key
         if not state.validate_api_key(request):
             raise HTTPException(
@@ -570,6 +572,190 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         # Forward request
         return await _forward_request(request, backend, state)
 
+    @app.get("/slots")
+    async def aggregate_slots(request: Request) -> JSONResponse:
+        """Aggregate slot status from all healthy backends."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
+        all_slots = []
+        async with state.get_lock():
+            healthy_backends = [b for b in state.backends if b.healthy]
+
+        for backend in healthy_backends:
+            try:
+                resp = await state.http_client.get(f"{backend.url}/slots", timeout=5.0)
+                if resp.status_code == 200:
+                    slots = resp.json()
+                    # Add backend info to each slot
+                    for slot in slots:
+                        slot["backend"] = backend.url
+                    all_slots.extend(slots)
+            except Exception:
+                pass
+
+        return JSONResponse(all_slots)
+
+    @app.get("/props")
+    async def aggregate_props(request: Request) -> JSONResponse:
+        """Aggregate server properties from all healthy backends."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
+        all_props = []
+        async with state.get_lock():
+            healthy_backends = [b for b in state.backends if b.healthy]
+
+        for backend in healthy_backends:
+            try:
+                resp = await state.http_client.get(f"{backend.url}/props", timeout=5.0)
+                if resp.status_code == 200:
+                    props = resp.json()
+                    props["backend"] = backend.url
+                    all_props.append(props)
+            except Exception:
+                pass
+
+        return JSONResponse({"backends": all_props})
+
+    @app.get("/metrics")
+    async def aggregate_metrics(request: Request) -> Response:
+        """Aggregate Prometheus metrics from all healthy backends."""
+        # Note: metrics endpoint typically doesn't require authentication
+        all_metrics = []
+        async with state.get_lock():
+            healthy_backends = [b for b in state.backends if b.healthy]
+
+        for backend in healthy_backends:
+            try:
+                resp = await state.http_client.get(f"{backend.url}/metrics", timeout=5.0)
+                if resp.status_code == 200:
+                    metrics = resp.text
+                    # Prefix metrics with backend identifier
+                    prefixed = "\n".join(
+                        f"# Backend: {backend.url}\n{line}" if not line.startswith("#") else line
+                        for line in metrics.split("\n")
+                    )
+                    all_metrics.append(prefixed)
+            except Exception:
+                pass
+
+        combined = "\n\n".join(all_metrics)
+        return Response(content=combined, media_type="text/plain")
+
+    # Legacy OpenAI endpoints (for compatibility)
+    @app.get("/v1/engines")
+    async def list_engines(request: Request) -> JSONResponse:
+        """Legacy endpoint - alias for /v1/models."""
+        return await list_models(request)
+
+    @app.get("/v1/engines/{engine_id}")
+    async def get_engine(engine_id: str, request: Request) -> JSONResponse:
+        """Legacy endpoint - get specific engine details."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
+        # Check if the model exists across backends
+        models_set = set()
+        async with state.get_lock():
+            for backend in state.backends:
+                if backend.healthy:
+                    models_set.update(backend.models)
+
+        if engine_id not in models_set:
+            raise HTTPException(status_code=404, detail=f"Engine '{engine_id}' not found")
+
+        return JSONResponse({
+            "id": engine_id,
+            "object": "engine",
+            "owner": "llamacpp",
+            "ready": True,
+        })
+
+    @app.post("/v1/engines/{engine_id}/completions")
+    async def engine_completions(engine_id: str, request: Request) -> Response:
+        """Legacy endpoint - completions with engine ID."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
+        # Select backend that has this model
+        async with state.get_lock():
+            backend = _select_backend(state.backends, engine_id)
+
+        if not backend:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No backends available for engine '{engine_id}'",
+            )
+
+        print(f"{_timestamp()} [lb-proxy] Forwarding legacy /v1/engines/{engine_id}/completions to {backend.url}/v1/completions", flush=True)
+
+        # Rewrite the request to /v1/completions with model parameter
+        body = await request.body()
+        try:
+            request_data = json.loads(body)
+            request_data["model"] = engine_id
+            body = json.dumps(request_data).encode()
+        except Exception:
+            pass
+
+        # Build new request
+        url = f"{backend.url}/v1/completions"
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in {"host", "content-length"}}
+
+        backend.active_requests += 1
+        backend.total_requests += 1
+        try:
+            backend_resp = await state.http_client.send(
+                state.http_client.build_request(
+                    method="POST",
+                    url=url,
+                    headers=headers,
+                    content=body,
+                ),
+                stream=True,
+            )
+
+            resp_headers = {
+                k: v
+                for k, v in backend_resp.headers.items()
+                if k.lower() not in {"transfer-encoding", "connection"}
+            }
+
+            async def _stream() -> AsyncIterator[bytes]:
+                try:
+                    async for chunk in backend_resp.aiter_bytes():
+                        yield chunk
+                finally:
+                    await backend_resp.aclose()
+                    backend.active_requests -= 1
+
+            return StreamingResponse(
+                _stream(),
+                status_code=backend_resp.status_code,
+                headers=resp_headers,
+                media_type=backend_resp.headers.get("content-type"),
+            )
+        except Exception as exc:
+            backend.active_requests -= 1
+            raise HTTPException(status_code=502, detail=f"Backend error: {exc}")
+
     @app.get("/v1/models")
     async def list_models(request: Request) -> JSONResponse:
         """Aggregate models from all healthy backends."""
@@ -588,6 +774,138 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
         models_data = [{"id": model, "object": "model"} for model in sorted(models_set)]
         return JSONResponse({"object": "list", "data": models_data})
+
+    @app.get("/")
+    async def root() -> HTMLResponse:
+        """Simple landing page with links to key endpoints."""
+        html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LlamaCPP Load Balancer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            color: #555;
+            margin-top: 0;
+        }
+        .links a {
+            display: block;
+            padding: 10px 15px;
+            margin: 8px 0;
+            background: #4CAF50;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            transition: background 0.3s;
+        }
+        .links a:hover {
+            background: #45a049;
+        }
+        .note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 12px;
+            margin: 20px 0;
+            color: #856404;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔄 LlamaCPP Load Balancer Proxy</h1>
+
+    <div class="card">
+        <h2>Welcome</h2>
+        <p>This is a load balancer proxy for llama.cpp servers. It routes API requests to multiple backend instances.</p>
+    </div>
+
+    <div class="note">
+        <strong>Note:</strong> This proxy handles API endpoints only. For a chat UI, access one of the backend servers directly.
+    </div>
+
+    <div class="card">
+        <h2>Available Endpoints</h2>
+        <div class="links">
+            <a href="/stats">📊 View Statistics</a>
+            <a href="/health">🏥 Health Check</a>
+            <a href="/backends">🖥️ Backend Status</a>
+            <a href="/v1/models">📝 List Models</a>
+            <a href="/slots">🎰 Slot Status</a>
+            <a href="/props">⚙️ Server Properties</a>
+            <a href="/metrics">📈 Metrics (Prometheus)</a>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>OpenAI-Compatible API Endpoints</h2>
+        <p><strong>Core endpoints:</strong></p>
+        <ul>
+            <li><code>POST /v1/chat/completions</code> - Chat completions (streaming supported)</li>
+            <li><code>POST /v1/completions</code> - Text completions (streaming supported)</li>
+            <li><code>POST /v1/embeddings</code> - Generate embeddings</li>
+            <li><code>GET /v1/models</code> - List all available models</li>
+        </ul>
+        <p><strong>Tokenization:</strong></p>
+        <ul>
+            <li><code>POST /v1/tokenize</code> - Tokenize text</li>
+            <li><code>POST /v1/detokenize</code> - Detokenize tokens</li>
+        </ul>
+        <p><strong>Legacy OpenAI endpoints:</strong></p>
+        <ul>
+            <li><code>GET /v1/engines</code> - List engines (alias for models)</li>
+            <li><code>GET /v1/engines/{engine_id}</code> - Get engine details</li>
+            <li><code>POST /v1/engines/{engine_id}/completions</code> - Legacy completions</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>llama.cpp-Specific Endpoints</h2>
+        <ul>
+            <li><code>GET /slots</code> - View slot status across all backends</li>
+            <li><code>GET /props</code> - Server properties from all backends</li>
+            <li><code>GET /metrics</code> - Prometheus metrics (aggregated)</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>Example</h2>
+        <pre style="background: #f4f4f4; padding: 15px; border-radius: 4px; overflow-x: auto;"><code>curl http://localhost:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "llama-3.3-70b-instruct",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'</code></pre>
+    </div>
+</body>
+</html>
+"""
+        return HTMLResponse(content=html)
 
     @app.get("/health")
     async def health() -> JSONResponse:
