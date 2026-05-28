@@ -447,6 +447,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 detail="No healthy backends available" if not model else f"No backends available for model '{model}'",
             )
 
+        # Log which backend is handling the request
+        print(f"{_timestamp()} [lb-proxy] Forwarding /v1/chat/completions to {backend.url}", flush=True)
+
         # Forward request
         return await _forward_request(request, backend, state)
 
@@ -477,6 +480,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 status_code=503,
                 detail="No healthy backends available" if not model else f"No backends available for model '{model}'",
             )
+
+        # Log which backend is handling the request
+        print(f"{_timestamp()} [lb-proxy] Forwarding {request.url.path} to {backend.url}", flush=True)
 
         # Forward request
         return await _forward_request(request, backend, state)
