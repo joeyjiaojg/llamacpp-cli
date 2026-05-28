@@ -33,7 +33,7 @@ help:
 	@echo "Proxy Server Commands (run on ONE proxy machine):"
 	@echo "  make build-proxy           Build proxy Docker image"
 	@echo "  make start-proxy           Start lb-proxy with subnet discovery"
-	@echo "  make start-proxy-with-auth Start lb-proxy with generated API key"
+	@echo "  make start-proxy-with-auth Start lb-proxy with API key (uses LLAMACPP_API_KEY or generates)"
 	@echo "  make generate-api-key      Generate a secure API key"
 	@echo "  make stop-proxy            Stop lb-proxy"
 	@echo "  make logs-proxy            View proxy logs"
@@ -46,16 +46,18 @@ help:
 	@echo "  make restore-models        Restore models from models-backup.tar.gz"
 	@echo ""
 	@echo "Environment Variables:"
-	@echo "  SUBNET       Subnet(s) to scan - supports comma-separated (default: 192.168.1.0/24)"
-	@echo "  PROXY_PORT   Proxy listen port (default: 8080)"
-	@echo "  AUTH_KEY     Backend authentication key (optional, for backend-to-proxy auth)"
-	@echo "  API_KEY      Client API key for authentication (optional, for client-to-proxy auth)"
-	@echo "  MODEL        Model name for pull command"
+	@echo "  SUBNET            Subnet(s) to scan - supports comma-separated (default: 192.168.1.0/24)"
+	@echo "  PROXY_PORT        Proxy listen port (default: 8080)"
+	@echo "  AUTH_KEY          Backend authentication key (optional, for backend-to-proxy auth)"
+	@echo "  API_KEY           Client API key for authentication (optional, for client-to-proxy auth)"
+	@echo "  LLAMACPP_API_KEY  Pre-configured API key for start-proxy-with-auth (optional)"
+	@echo "  MODEL             Model name for pull command"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make start-backend MODEL_ARGS='--model qwen3.5'"
 	@echo "  make start-proxy SUBNET=10.231.213.0/24,10.231.214.0/24,10.231.215.0/24 PROXY_PORT=8081"
 	@echo "  make start-proxy-with-auth SUBNET=10.231.213.0/24 PROXY_PORT=8081"
+	@echo "  LLAMACPP_API_KEY=my-secret-key make start-proxy-with-auth SUBNET=10.231.213.0/24"
 	@echo "  make start-proxy AUTH_KEY=backend-key API_KEY=client-key SUBNET=10.231.213.0/24"
 	@echo "  make pull-model MODEL=qwen3.5"
 
@@ -148,11 +150,16 @@ start-proxy:
 	@echo "Wait 10-15 seconds for backend discovery..."
 
 start-proxy-with-auth:
-	@echo "Generating secure API key..."
-	@API_KEY=$$(python3 -c "import secrets; print(secrets.token_urlsafe(32))"); \
+	@if [ -n "$$LLAMACPP_API_KEY" ]; then \
+		API_KEY=$$LLAMACPP_API_KEY; \
+		echo "Using API key from LLAMACPP_API_KEY environment variable"; \
+	else \
+		echo "Generating secure API key..."; \
+		API_KEY=$$(python3 -c "import secrets; print(secrets.token_urlsafe(32))"); \
+	fi; \
 	echo ""; \
 	echo "========================================"; \
-	echo "Generated API Key: $$API_KEY"; \
+	echo "API Key: $$API_KEY"; \
 	echo "========================================"; \
 	echo ""; \
 	echo "Save this key! Clients must use:"; \
