@@ -647,7 +647,7 @@ def run_lb_proxy(
                 tasks = []
                 async def _try_host(host: str) -> Backend | None:
                     backend = Backend(host=host, port=discover_port)
-                    if await _check_backend_health(backend, client, auth_key, verbose=True):
+                    if await _check_backend_health(backend, client, auth_key, verbose=False):
                         await _refresh_backend_models(backend, client, auth_key)
                         backend.last_health_check = time.time()
                         return backend
