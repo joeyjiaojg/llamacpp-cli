@@ -46,12 +46,18 @@ class ProxyState:
     """Shared state for the load balancer proxy."""
 
     backends: list[Backend] = field(default_factory=list)
-    backends_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    backends_lock: asyncio.Lock | None = None  # Created lazily in the correct event loop
     http_client: httpx.AsyncClient = field(default_factory=lambda: httpx.AsyncClient(timeout=30.0))
     health_check_interval: float = 10.0
     health_check_task: asyncio.Task | None = None
     config_path: Path | None = None
     config_watch_task: asyncio.Task | None = None
+
+    def get_lock(self) -> asyncio.Lock:
+        """Get or create the backends lock in the current event loop."""
+        if self.backends_lock is None:
+            self.backends_lock = asyncio.Lock()
+        return self.backends_lock
 
 
 async def _check_backend_health(backend: Backend, client: httpx.AsyncClient) -> bool:
@@ -88,7 +94,7 @@ async def _health_check_loop(state: ProxyState) -> None:
     """Periodically check backend health and refresh model lists."""
     while True:
         await asyncio.sleep(state.health_check_interval)
-        async with state.backends_lock:
+        async with state.get_lock():
             for backend in state.backends:
                 now = time.time()
                 if now - backend.last_health_check < state.health_check_interval:
@@ -142,7 +148,7 @@ async def _load_backends_from_config(state: ProxyState) -> None:
             backend = Backend(host=b["host"], port=b["port"])
             new_backends.append(backend)
 
-        async with state.backends_lock:
+        async with state.get_lock():
             existing = {(b.host, b.port) for b in state.backends}
             new = {(b.host, b.port) for b in new_backends}
 
@@ -315,7 +321,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             model = None
 
         # Select backend
-        async with state.backends_lock:
+        async with state.get_lock():
             backend = _select_backend(state.backends, model)
 
         if not backend:
@@ -331,7 +337,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
     async def list_models() -> JSONResponse:
         """Aggregate models from all healthy backends."""
         models_set = set()
-        async with state.backends_lock:
+        async with state.get_lock():
             for backend in state.backends:
                 if backend.healthy:
                     models_set.update(backend.models)
@@ -341,7 +347,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
     @app.get("/health")
     async def health() -> JSONResponse:
-        async with state.backends_lock:
+        async with state.get_lock():
             healthy_count = sum(1 for b in state.backends if b.healthy)
             total_count = len(state.backends)
 
@@ -353,7 +359,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
     @app.get("/backends")
     async def list_backends() -> JSONResponse:
         """List all backends and their status."""
-        async with state.backends_lock:
+        async with state.get_lock():
             backends_data = [
                 {
                     "url": b.url,
@@ -430,21 +436,58 @@ def run_lb_proxy(
     # Initial load from config
     asyncio.run(_load_backends_from_config(state))
 
-    # Discover backends on subnet(s) - supports comma-separated subnets
+    # Start the FastAPI app
+    app = create_lb_app(state)
+
+    # Schedule background discovery tasks
+    discover_tasks = []
     if discover_subnet:
         subnets = [s.strip() for s in discover_subnet.split(",")]
+        print(f"[lb-proxy] Starting background discovery for {len(subnets)} subnet(s)...", flush=True)
+
+        async def _discover_and_check(subnet: str) -> None:
+            """Discover backends on a subnet in the background."""
+            # Create a new httpx client for this thread (httpx clients are not thread-safe)
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                print(f"[lb-proxy] Scanning {subnet} for backends on port {discover_port}…", flush=True)
+
+                # Modified version of _discover_backends_on_subnet that uses local client
+                import ipaddress
+                try:
+                    network = ipaddress.ip_network(subnet, strict=False)
+                except ValueError as exc:
+                    print(f"[lb-proxy] Invalid subnet {subnet}: {exc}", flush=True)
+                    return
+
+                tasks = []
+                async def _try_host(host: str) -> Backend | None:
+                    backend = Backend(host=host, port=discover_port)
+                    if await _check_backend_health(backend, client):
+                        await _refresh_backend_models(backend, client)
+                        backend.last_health_check = time.time()
+                        return backend
+                    return None
+
+                for ip in network.hosts():
+                    tasks.append(_try_host(str(ip)))
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                async with state.get_lock():
+                    for result in results:
+                        if isinstance(result, Backend):
+                            # Check if already exists
+                            if any(b.host == result.host and b.port == result.port for b in state.backends):
+                                continue
+                            state.backends.append(result)
+                            print(f"[lb-proxy] Discovered backend: {result.url}, models: {result.models}", flush=True)
+
+                print(f"[lb-proxy] Completed scan of {subnet}", flush=True)
+
         for subnet in subnets:
-            print(f"[lb-proxy] Discovering backends on {subnet}...", flush=True)
-            asyncio.run(_discover_backends_on_subnet(state, subnet, discover_port))
+            discover_tasks.append(_discover_and_check(subnet))
 
-    if not state.backends:
-        print("[lb-proxy] No backends configured. Add backends to:")
-        print(f"  {state.config_path}")
-        print("Or use --backend http://host:port")
-        print("Or use --discover-subnet 192.168.1.0/24")
-        sys.exit(1)
-
-    # Initial health check
+    # Initial health check for any pre-configured backends
     async def _initial_checks() -> None:
         for backend in state.backends:
             healthy = await _check_backend_health(backend, state.http_client)
@@ -452,27 +495,43 @@ def run_lb_proxy(
             backend.last_health_check = time.time()
             if healthy:
                 await _refresh_backend_models(backend, state.http_client)
-                print(f"[lb-proxy] Backend {backend.url} ready, models: {backend.models}")
+                print(f"[lb-proxy] Backend {backend.url} ready, models: {backend.models}", flush=True)
             else:
-                print(f"[lb-proxy] Backend {backend.url} unhealthy")
+                print(f"[lb-proxy] Backend {backend.url} unhealthy", flush=True)
 
     asyncio.run(_initial_checks())
 
-    app = create_lb_app(state)
-
-    print(f"\nllamacpp load-balancer proxy listening on {host}:{port}")
-    print(f"Config: {state.config_path}")
-    print(f"Backends: {len([b for b in state.backends if b.healthy])}/{len(state.backends)} healthy")
+    print(f"\nllamacpp load-balancer proxy listening on {host}:{port}", flush=True)
+    print(f"Config: {state.config_path}", flush=True)
+    print(f"Backends: {len([b for b in state.backends if b.healthy])}/{len(state.backends)} healthy", flush=True)
+    if discover_subnet:
+        print(f"Discovery running in background for: {discover_subnet}", flush=True)
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
+
+    # Start background discovery in a separate thread
+    if discover_tasks:
+        import threading
+
+        def _run_discovery():
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(asyncio.gather(*discover_tasks))
+            finally:
+                loop.close()
+
+        discovery_thread = threading.Thread(target=_run_discovery, daemon=True)
+        discovery_thread.start()
 
     try:
         server.run()
     except KeyboardInterrupt:
         pass
     finally:
-        print("\n[lb-proxy] Shutting down…")
+        print("\n[lb-proxy] Shutting down…", flush=True)
         asyncio.run(state.http_client.aclose())
-        print("[lb-proxy] Stopped.")
+        print("[lb-proxy] Stopped.", flush=True)
         sys.exit(0)
