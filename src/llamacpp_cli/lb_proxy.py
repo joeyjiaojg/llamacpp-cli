@@ -19,7 +19,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .config import get_config_dir
+from .config import get_base_dir
 
 
 @dataclass
@@ -408,7 +408,7 @@ def run_lb_proxy(
         state.config_path = config_path
     else:
         # Default config path
-        config_path = get_config_dir() / "lb_backends.json"
+        config_path = get_base_dir() / "lb_backends.json"
         if not config_path.exists():
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps({"backends": []}, indent=2))
