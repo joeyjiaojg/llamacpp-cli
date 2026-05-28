@@ -418,22 +418,62 @@ async def _forward_request(
                 # Try to parse response and extract token usage
                 try:
                     full_response = b"".join(response_chunks).decode("utf-8")
-                    response_data = json.loads(full_response)
-                    usage = response_data.get("usage", {})
-                    actual_prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                    completion_tokens = usage.get("completion_tokens", 0)
 
-                    backend.total_prompt_tokens += actual_prompt_tokens
-                    backend.total_completion_tokens += completion_tokens
+                    # Check if it's a streaming response (SSE format with "data:" lines)
+                    if "data:" in full_response:
+                        # Parse SSE format - extract the last valid JSON chunk
+                        lines = full_response.strip().split("\n")
+                        last_usage = None
 
-                    print(
-                        f"{_timestamp()} [lb-proxy] {backend.url} - "
-                        f"prompt_tokens: {actual_prompt_tokens}, "
-                        f"completion_tokens: {completion_tokens}",
-                        flush=True
-                    )
-                except Exception:
+                        for line in lines:
+                            line = line.strip()
+                            if line.startswith("data:"):
+                                json_str = line[5:].strip()  # Remove "data:" prefix
+                                if json_str and json_str != "[DONE]":
+                                    try:
+                                        chunk_data = json.loads(json_str)
+                                        # Extract usage if present in this chunk
+                                        if "usage" in chunk_data:
+                                            last_usage = chunk_data["usage"]
+                                    except json.JSONDecodeError:
+                                        pass
+
+                        if last_usage:
+                            actual_prompt_tokens = last_usage.get("prompt_tokens", prompt_tokens)
+                            completion_tokens = last_usage.get("completion_tokens", 0)
+
+                            backend.total_prompt_tokens += actual_prompt_tokens
+                            backend.total_completion_tokens += completion_tokens
+
+                            print(
+                                f"{_timestamp()} [lb-proxy] {backend.url} - "
+                                f"prompt_tokens: {actual_prompt_tokens}, "
+                                f"completion_tokens: {completion_tokens}",
+                                flush=True
+                            )
+                        else:
+                            # No usage found in SSE, use estimate
+                            if prompt_tokens > 0:
+                                backend.total_prompt_tokens += prompt_tokens
+                    else:
+                        # Non-streaming JSON response
+                        response_data = json.loads(full_response)
+                        usage = response_data.get("usage", {})
+                        actual_prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                        completion_tokens = usage.get("completion_tokens", 0)
+
+                        backend.total_prompt_tokens += actual_prompt_tokens
+                        backend.total_completion_tokens += completion_tokens
+
+                        print(
+                            f"{_timestamp()} [lb-proxy] {backend.url} - "
+                            f"prompt_tokens: {actual_prompt_tokens}, "
+                            f"completion_tokens: {completion_tokens}",
+                            flush=True
+                        )
+                except Exception as e:
                     # If we can't parse, use the estimate
+                    print(f"{_timestamp()} [lb-proxy] Failed to parse token usage: {e}", flush=True)
                     if prompt_tokens > 0:
                         backend.total_prompt_tokens += prompt_tokens
 
