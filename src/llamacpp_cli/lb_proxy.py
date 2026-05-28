@@ -434,7 +434,7 @@ def run_lb_proxy(
     if discover_subnet:
         subnets = [s.strip() for s in discover_subnet.split(",")]
         for subnet in subnets:
-            print(f"[lb-proxy] Discovering backends on {subnet}...")
+            print(f"[lb-proxy] Discovering backends on {subnet}...", flush=True)
             asyncio.run(_discover_backends_on_subnet(state, subnet, discover_port))
 
     if not state.backends:

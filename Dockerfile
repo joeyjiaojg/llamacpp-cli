@@ -29,6 +29,7 @@ ENV LLAMACPP_HOME=/data/llamacpp/.llamacpp
 ENV PATH="${LLAMACPP_HOME}/bin:${PATH}"
 ENV LLAMACPP_AUTO_INSTALL=true
 ENV LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
+ENV PYTHONUNBUFFERED=1
 
 # Pre-install llama.cpp during build (bypasses GitHub API rate limits)
 RUN llamacpp install || echo "llama.cpp install failed - will retry at runtime"
