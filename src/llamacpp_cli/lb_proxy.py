@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from .config import get_base_dir
+from .lb_proxy_logging import add_request_tracing, configure_logging
 
 
 def _timestamp() -> str:
@@ -926,6 +927,9 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
     app = FastAPI(title="llamacpp-lb-proxy", lifespan=lifespan)
 
+    # Structured request tracing middleware
+    app.middleware("http")(add_request_tracing)
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
         # Validate API key
@@ -934,6 +938,15 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 status_code=401,
                 detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
             )
+
+        # Check rate limit
+        if state.rate_limiter:
+            allowed, err = await state.rate_limiter.check_rate_limit(request)
+            if not allowed:
+                raise HTTPException(status_code=429, detail=err)
+
+        # Check request size
+        await _check_request_size(request, state.max_request_size)
 
         # Extract model from request
         try:
@@ -978,6 +991,15 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 status_code=401,
                 detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
             )
+
+        # Check rate limit
+        if state.rate_limiter:
+            allowed, err = await state.rate_limiter.check_rate_limit(request)
+            if not allowed:
+                raise HTTPException(status_code=429, detail=err)
+
+        # Check request size
+        await _check_request_size(request, state.max_request_size)
 
         # Extract model from request
         try:

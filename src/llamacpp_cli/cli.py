@@ -299,6 +299,30 @@ def show(model: str) -> None:
     default=None,
     help="Optional API key for client requests. If set, clients must provide: Authorization: Bearer API_KEY",
 )
+@click.option(
+    "--log-level",
+    default=None,
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Log level (default: INFO). Can also be set via LOG_LEVEL env var.",
+)
+@click.option(
+    "--log-format",
+    default="json",
+    type=click.Choice(["json", "text"], case_sensitive=False),
+    help="Log format: json for structured logging, text for human-readable output (default: json).",
+)
+@click.option(
+    "--max-request-size",
+    default=10 * 1024 * 1024,
+    type=int,
+    help="Maximum request body size in bytes (default: 10485760 = 10MB).",
+)
+@click.option(
+    "--max-response-tokens",
+    default=32000,
+    type=int,
+    help="Maximum response tokens allowed (default: 32000).",
+)
 def lb_proxy(
     host: str,
     port: int,
@@ -308,6 +332,10 @@ def lb_proxy(
     discover_port: int,
     auth_key: str | None,
     api_key: str | None,
+    log_level: str | None,
+    log_format: str,
+    max_request_size: int,
+    max_response_tokens: int,
 ) -> None:
     """Start a multi-backend load balancer proxy.
 
@@ -346,7 +374,12 @@ def lb_proxy(
           ]
         }
     """
+    import os
     from .lb_proxy import run_lb_proxy
+
+    # Get log level from env var if not provided via CLI
+    if log_level is None:
+        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
     run_lb_proxy(
         host=host,
@@ -357,4 +390,8 @@ def lb_proxy(
         discover_port=discover_port,
         auth_key=auth_key,
         api_key=api_key,
+        log_level=log_level,
+        log_format=log_format,
+        max_request_size=max_request_size,
+        max_response_tokens=max_response_tokens,
     )
