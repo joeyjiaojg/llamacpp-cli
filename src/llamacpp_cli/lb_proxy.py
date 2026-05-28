@@ -430,9 +430,12 @@ def run_lb_proxy(
     # Initial load from config
     asyncio.run(_load_backends_from_config(state))
 
-    # Discover backends on subnet
+    # Discover backends on subnet(s) - supports comma-separated subnets
     if discover_subnet:
-        asyncio.run(_discover_backends_on_subnet(state, discover_subnet, discover_port))
+        subnets = [s.strip() for s in discover_subnet.split(",")]
+        for subnet in subnets:
+            print(f"[lb-proxy] Discovering backends on {subnet}...")
+            asyncio.run(_discover_backends_on_subnet(state, subnet, discover_port))
 
     if not state.backends:
         print("[lb-proxy] No backends configured. Add backends to:")

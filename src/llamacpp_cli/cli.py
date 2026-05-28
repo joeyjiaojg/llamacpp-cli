@@ -189,7 +189,7 @@ def show(model: str) -> None:
 @click.option(
     "--discover-subnet",
     default=None,
-    help="Auto-discover backends on subnet (e.g., 192.168.1.0/24).",
+    help="Auto-discover backends on subnet(s) - supports comma-separated (e.g., 192.168.1.0/24,10.0.0.0/24).",
 )
 @click.option(
     "--discover-port",
@@ -218,8 +218,11 @@ def lb_proxy(
         # Manual backends
         llamacpp lb-proxy -b http://machine1:8000 -b http://machine2:8000
 
-        # Auto-discover on subnet
+        # Auto-discover on single subnet
         llamacpp lb-proxy --discover-subnet 192.168.1.0/24
+
+        # Auto-discover on multiple subnets (comma-separated)
+        llamacpp lb-proxy --discover-subnet 10.231.213.0/24,10.231.214.0/24,10.231.215.0/24
 
         # Use config file (auto-reloads on changes)
         llamacpp lb-proxy --config ./backends.json
