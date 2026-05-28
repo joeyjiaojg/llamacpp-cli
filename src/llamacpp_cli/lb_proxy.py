@@ -53,12 +53,25 @@ class ProxyState:
     config_path: Path | None = None
     config_watch_task: asyncio.Task | None = None
     auth_key: str | None = None  # Optional authentication key for backend discovery
+    api_key: str | None = None  # Optional API key for client requests
 
     def get_lock(self) -> asyncio.Lock:
         """Get or create the backends lock in the current event loop."""
         if self.backends_lock is None:
             self.backends_lock = asyncio.Lock()
         return self.backends_lock
+
+    def validate_api_key(self, request: Request) -> bool:
+        """Validate API key from request. Returns True if valid or no key required."""
+        if not self.api_key:
+            return True  # No API key required
+
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return False
+
+        token = auth_header[7:]  # Remove "Bearer " prefix
+        return token == self.api_key
 
 
 async def _check_backend_health(
@@ -353,6 +366,44 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
+        # Extract model from request
+        try:
+            body: Any = await request.json()
+            model = body.get("model") if isinstance(body, dict) else None
+        except Exception:
+            model = None
+
+        # Select backend
+        async with state.get_lock():
+            backend = _select_backend(state.backends, model)
+
+        if not backend:
+            raise HTTPException(
+                status_code=503,
+                detail="No healthy backends available" if not model else f"No backends available for model '{model}'",
+            )
+
+        # Forward request
+        return await _forward_request(request, backend, state)
+
+    @app.post("/v1/completions")
+    @app.post("/v1/embeddings")
+    async def other_endpoints(request: Request) -> Response:
+        """Handle other OpenAI endpoints (completions, embeddings, etc.)."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
         # Extract model from request
         try:
             body: Any = await request.json()
@@ -424,6 +475,7 @@ def run_lb_proxy(
     discover_port: int = 8000,
     backends: list[str] | None = None,
     auth_key: str | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
     import secrets
@@ -441,6 +493,13 @@ def run_lb_proxy(
         print(f"[lb-proxy] Authentication disabled - all backends will be discovered", flush=True)
         print(f"[lb-proxy] Use --auth-key to enable authentication", flush=True)
 
+    # API key for client requests
+    if api_key:
+        print(f"[lb-proxy] Client API key required (key: {api_key[:8]}...)", flush=True)
+        print(f"[lb-proxy] Clients must provide: Authorization: Bearer {api_key}", flush=True)
+    else:
+        print(f"[lb-proxy] No API key required for clients", flush=True)
+
     # Check port availability
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
         _s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -456,6 +515,7 @@ def run_lb_proxy(
     # Setup state
     state = ProxyState()
     state.auth_key = auth_key
+    state.api_key = api_key
 
     # Load config file
     if config_file:

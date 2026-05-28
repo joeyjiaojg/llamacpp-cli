@@ -202,6 +202,11 @@ def show(model: str) -> None:
     default=None,
     help="Optional authentication key - only backends with matching key will be added.",
 )
+@click.option(
+    "--api-key",
+    default=None,
+    help="Optional API key for client requests. If set, clients must provide: Authorization: Bearer API_KEY",
+)
 def lb_proxy(
     host: str,
     port: int,
@@ -210,6 +215,7 @@ def lb_proxy(
     discover_subnet: str | None,
     discover_port: int,
     auth_key: str | None,
+    api_key: str | None,
 ) -> None:
     """Start a multi-backend load balancer proxy.
 
@@ -233,6 +239,9 @@ def lb_proxy(
         # With authentication key (only backends with matching key will join)
         llamacpp lb-proxy --discover-subnet 192.168.1.0/24 --auth-key my-secret-key
 
+        # With API key (clients must provide Authorization header)
+        llamacpp lb-proxy --discover-subnet 192.168.1.0/24 --api-key your-api-key
+
         # Use config file (auto-reloads on changes)
         llamacpp lb-proxy --config ./backends.json
 
@@ -255,4 +264,5 @@ def lb_proxy(
         discover_subnet=discover_subnet,
         discover_port=discover_port,
         auth_key=auth_key,
+        api_key=api_key,
     )
