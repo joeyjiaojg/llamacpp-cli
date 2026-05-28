@@ -64,7 +64,8 @@ class ProxyState:
 async def _check_backend_health(
     backend: Backend,
     client: httpx.AsyncClient,
-    auth_key: str | None = None
+    auth_key: str | None = None,
+    verbose: bool = False
 ) -> bool:
     """Check if a backend is healthy and is a valid llama-server instance.
 
@@ -75,23 +76,38 @@ async def _check_backend_health(
     """
     headers = {}
     if auth_key:
-        headers["X-LB-Auth-Key"] = auth_key
+        headers["Authorization"] = f"Bearer {auth_key}"
 
     try:
         # Check /v1/models to validate it's an OpenAI-compatible server
         resp = await client.get(f"{backend.url}/v1/models", headers=headers, timeout=5.0)
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception as e:
+                if verbose:
+                    print(f"[lb-proxy] {backend.url} rejected: JSON parse error - {e}", flush=True)
+                return False
+
             # Validate OpenAI-compatible response format
             if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
                 # Check auth key if backend sends it back
                 if auth_key:
-                    backend_key = resp.headers.get("X-LB-Auth-Key")
-                    if backend_key != auth_key:
+                    backend_key = resp.headers.get("Authorization")
+                    if backend_key and backend_key != f"Bearer {auth_key}":
+                        if verbose:
+                            print(f"[lb-proxy] {backend.url} rejected: auth key mismatch", flush=True)
                         return False
                 return True
-    except Exception:
-        pass
+            else:
+                if verbose:
+                    print(f"[lb-proxy] {backend.url} rejected: invalid format - data={type(data)}, has_data={'data' in data if isinstance(data, dict) else False}", flush=True)
+        else:
+            if verbose:
+                print(f"[lb-proxy] {backend.url} rejected: status {resp.status_code}", flush=True)
+    except Exception as e:
+        if verbose:
+            print(f"[lb-proxy] {backend.url} rejected: {type(e).__name__}: {e}", flush=True)
 
     return False
 
@@ -408,13 +424,20 @@ def run_lb_proxy(
     auth_key: str | None = None,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
+    import secrets
     import socket
     import sys
 
     import uvicorn
 
+    # Auth is opt-in: only use if explicitly provided
+    # Don't auto-generate - makes discovery impossible
     if auth_key:
-        print(f"[lb-proxy] Authentication enabled (key: {auth_key[:4]}...)", flush=True)
+        print(f"[lb-proxy] Authentication enabled (key: {auth_key[:8]}...)", flush=True)
+        print(f"[lb-proxy] Backends must include: Authorization: Bearer {auth_key}", flush=True)
+    else:
+        print(f"[lb-proxy] Authentication disabled - all backends will be discovered", flush=True)
+        print(f"[lb-proxy] Use --auth-key to enable authentication", flush=True)
 
     # Check port availability
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
@@ -491,7 +514,7 @@ def run_lb_proxy(
                 tasks = []
                 async def _try_host(host: str) -> Backend | None:
                     backend = Backend(host=host, port=discover_port)
-                    if await _check_backend_health(backend, client, auth_key):
+                    if await _check_backend_health(backend, client, auth_key, verbose=True):
                         await _refresh_backend_models(backend, client)
                         backend.last_health_check = time.time()
                         return backend
