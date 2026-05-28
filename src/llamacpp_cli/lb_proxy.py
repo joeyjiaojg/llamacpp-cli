@@ -1629,6 +1629,10 @@ def run_lb_proxy(
     api_key: str | None = None,
     rate_limit_rpm: int = 60,
     rate_limit_tph: int = 1000000,
+    log_level: str = "INFO",
+    log_format: str = "json",
+    max_request_size: int = 10 * 1024 * 1024,
+    max_response_tokens: int = 32000,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
     import socket
@@ -1681,6 +1685,12 @@ def run_lb_proxy(
     state = ProxyState()
     state.auth_key = auth_key
     state.api_key = api_key
+    state.max_request_size = max_request_size
+    state.max_response_tokens = max_response_tokens
+    state.rate_limiter = RateLimiter(rpm_limit=rate_limit_rpm, tph_limit=rate_limit_tph)
+
+    # Configure structured logging
+    configure_logging(log_level=log_level, log_format=log_format)
 
     # Load config file
     if config_file:
