@@ -14,6 +14,7 @@ MODEL_ARGS ?=
 # Default subnet for proxy discovery (override with: make start-proxy SUBNET=10.0.0.0/24)
 SUBNET ?= 192.168.1.0/24
 PROXY_PORT ?= 8080
+AUTH_KEY ?=
 API_KEY ?=
 
 help:
@@ -47,14 +48,15 @@ help:
 	@echo "Environment Variables:"
 	@echo "  SUBNET       Subnet(s) to scan - supports comma-separated (default: 192.168.1.0/24)"
 	@echo "  PROXY_PORT   Proxy listen port (default: 8080)"
-	@echo "  API_KEY      Client API key for authentication (optional)"
+	@echo "  AUTH_KEY     Backend authentication key (optional, for backend-to-proxy auth)"
+	@echo "  API_KEY      Client API key for authentication (optional, for client-to-proxy auth)"
 	@echo "  MODEL        Model name for pull command"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make start-backend MODEL_ARGS='--model qwen3.5'"
 	@echo "  make start-proxy SUBNET=10.231.213.0/24,10.231.214.0/24,10.231.215.0/24 PROXY_PORT=8081"
 	@echo "  make start-proxy-with-auth SUBNET=10.231.213.0/24 PROXY_PORT=8081"
-	@echo "  make start-proxy API_KEY=your-key-here SUBNET=10.231.213.0/24 PROXY_PORT=8081"
+	@echo "  make start-proxy AUTH_KEY=backend-key API_KEY=client-key SUBNET=10.231.213.0/24"
 	@echo "  make pull-model MODEL=qwen3.5"
 
 # ============================================================================
@@ -120,15 +122,21 @@ start-proxy:
 	@echo "Starting lb-proxy with subnet discovery..."
 	@echo "Scanning subnet: $(SUBNET)"
 	@echo "Proxy port: $(PROXY_PORT)"
-	@if [ -n "$(API_KEY)" ]; then \
-		echo "API Key: $(API_KEY)"; \
-		echo "Clients must authenticate with: Authorization: Bearer $(API_KEY)"; \
-		DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) API_KEY=$(API_KEY) \
+	@if [ -n "$(AUTH_KEY)" ] || [ -n "$(API_KEY)" ]; then \
+		if [ -n "$(AUTH_KEY)" ]; then \
+			echo "Backend auth key: $(AUTH_KEY)"; \
+			echo "Backends must authenticate with: Authorization: Bearer $(AUTH_KEY)"; \
+		fi; \
+		if [ -n "$(API_KEY)" ]; then \
+			echo "Client API Key: $(API_KEY)"; \
+			echo "Clients must authenticate with: Authorization: Bearer $(API_KEY)"; \
+		fi; \
+		DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) AUTH_KEY=$(AUTH_KEY) API_KEY=$(API_KEY) \
 			$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
 	else \
-		echo "No API key set - proxy will allow unauthenticated access"; \
-		echo "Use: make start-proxy-with-auth to generate and use an API key"; \
-		echo "Or: make start-proxy API_KEY=your-key SUBNET=..."; \
+		echo "No authentication keys set - proxy will allow unauthenticated access"; \
+		echo "Use: make start-proxy-with-auth to generate and use keys"; \
+		echo "Or: make start-proxy AUTH_KEY=backend-key API_KEY=client-key SUBNET=..."; \
 		DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
 			$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
 	fi
@@ -150,10 +158,12 @@ start-proxy-with-auth:
 	echo "Save this key! Clients must use:"; \
 	echo "  Authorization: Bearer $$API_KEY"; \
 	echo ""; \
+	echo "Backends must also use this key in their Authorization header"; \
+	echo ""; \
 	echo "Starting lb-proxy with subnet discovery..."; \
 	echo "Scanning subnet: $(SUBNET)"; \
 	echo "Proxy port: $(PROXY_PORT)"; \
-	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) API_KEY=$$API_KEY \
+	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) AUTH_KEY=$$API_KEY API_KEY=$$API_KEY \
 		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
 	echo ""; \
 	echo "Proxy started! Access at:"; \
