@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from .config import get_base_dir
 
@@ -586,7 +586,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
     @app.get("/stats")
     @app.get("/v1/stats")
-    async def stats() -> JSONResponse:
+    async def stats(request: Request, format: str | None = None) -> Response:
         """Get token usage statistics (no authentication required)."""
         async with state.get_lock():
             # Calculate totals
@@ -607,7 +607,7 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 for b in state.backends
             ]
 
-        return JSONResponse({
+        stats_data = {
             "total": {
                 "requests": total_requests,
                 "prompt_tokens": total_prompt_tokens,
@@ -615,7 +615,176 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 "total_tokens": total_prompt_tokens + total_completion_tokens,
             },
             "backends": backend_stats,
-        })
+        }
+
+        # Return JSON if format=json is specified
+        if format == "json":
+            return JSONResponse(stats_data)
+
+        # Otherwise return HTML
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Load Balancer Stats</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        h1 {{
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #555;
+            margin-top: 30px;
+        }}
+        .total-stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }}
+        .stat-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .stat-card .label {{
+            color: #777;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .stat-card .value {{
+            color: #333;
+            font-size: 32px;
+            font-weight: bold;
+            margin-top: 5px;
+        }}
+        table {{
+            width: 100%;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-collapse: collapse;
+        }}
+        th {{
+            background: #4CAF50;
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+        }}
+        td {{
+            padding: 12px 15px;
+            border-bottom: 1px solid #eee;
+        }}
+        tr:last-child td {{
+            border-bottom: none;
+        }}
+        tr:hover {{
+            background: #f9f9f9;
+        }}
+        .healthy {{
+            color: #4CAF50;
+            font-weight: bold;
+        }}
+        .unhealthy {{
+            color: #f44336;
+            font-weight: bold;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            text-align: center;
+            color: #777;
+            font-size: 14px;
+        }}
+        .footer a {{
+            color: #4CAF50;
+            text-decoration: none;
+        }}
+        .footer a:hover {{
+            text-decoration: underline;
+        }}
+    </style>
+</head>
+<body>
+    <h1>🔄 Load Balancer Statistics</h1>
+
+    <h2>Total Statistics</h2>
+    <div class="total-stats">
+        <div class="stat-card">
+            <div class="label">Total Requests</div>
+            <div class="value">{total_requests:,}</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Prompt Tokens</div>
+            <div class="value">{total_prompt_tokens:,}</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Completion Tokens</div>
+            <div class="value">{total_completion_tokens:,}</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Total Tokens</div>
+            <div class="value">{total_prompt_tokens + total_completion_tokens:,}</div>
+        </div>
+    </div>
+
+    <h2>Backend Statistics</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Backend URL</th>
+                <th>Status</th>
+                <th>Requests</th>
+                <th>Prompt Tokens</th>
+                <th>Completion Tokens</th>
+                <th>Total Tokens</th>
+            </tr>
+        </thead>
+        <tbody>
+"""
+
+        for backend in backend_stats:
+            status_class = "healthy" if backend["healthy"] else "unhealthy"
+            status_text = "✓ Healthy" if backend["healthy"] else "✗ Unhealthy"
+            html += f"""
+            <tr>
+                <td><code>{backend["url"]}</code></td>
+                <td class="{status_class}">{status_text}</td>
+                <td>{backend["total_requests"]:,}</td>
+                <td>{backend["total_prompt_tokens"]:,}</td>
+                <td>{backend["total_completion_tokens"]:,}</td>
+                <td>{backend["total_tokens"]:,}</td>
+            </tr>
+"""
+
+        html += """
+        </tbody>
+    </table>
+
+    <div class="footer">
+        <p>View as JSON: <a href="?format=json">?format=json</a></p>
+        <p>llamacpp load-balancer proxy</p>
+    </div>
+</body>
+</html>
+"""
+        return HTMLResponse(content=html)
 
     return app
 
