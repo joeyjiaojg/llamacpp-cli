@@ -16,9 +16,10 @@ services:
       - LLAMACPP_HOME=/data/llamacpp/.llamacpp
       # Optional: disable SSL verification for Hugging Face downloads behind proxy
       # - LLAMACPP_SSL_VERIFY=false
+      # Optional: GitHub token to avoid API rate limits during install
+      # - GITHUB_TOKEN=${GITHUB_TOKEN}
     command: >
       bash -c "
-        llamacpp install &&
         llamacpp serve --host 0.0.0.0 --port 8000 ${MODEL_ARGS}
       "
     restart: unless-stopped

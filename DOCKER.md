@@ -222,6 +222,10 @@ make start-proxy SUBNET=10.0.0.0/24 PROXY_PORT=9090
 
 # Backend with specific model and context size
 make start-backend MODEL_ARGS="--model qwen3.5 --ctx-size 8192"
+
+# Use GitHub token to bypass API rate limits (during build)
+export GITHUB_TOKEN=ghp_your_token_here
+make build-backend
 ```
 
 Available variables:
@@ -232,6 +236,7 @@ Available variables:
 | `PROXY_PORT` | `8080` | Proxy listen port |
 | `MODEL` | - | Model name for `pull-model` |
 | `MODEL_ARGS` | - | Extra args for `llamacpp serve` |
+| `GITHUB_TOKEN` | - | GitHub token to bypass API rate limits |
 
 ### Docker Compose Variables
 
@@ -375,7 +380,43 @@ ufw allow 8080/tcp
 
 ## Troubleshooting
 
-### Problem: Subnet discovery finds no backends
+### Problem: GitHub API rate limit during build
+
+**Symptoms:**
+```
+Error fetching release info: 403 Client Error: rate limit exceeded
+```
+
+**Solutions:**
+
+1. **Use cached image** (llama.cpp already pre-installed):
+   ```bash
+   docker pull your-registry/llamacpp-cli:latest
+   ```
+
+2. **Set GitHub token during build**:
+   ```bash
+   export GITHUB_TOKEN=ghp_your_token_here
+   make build-backend
+   ```
+   
+   Create a token at: https://github.com/settings/tokens (no special permissions needed)
+
+3. **Wait and retry** (rate limit resets after 1 hour):
+   ```bash
+   # Check rate limit status
+   curl https://api.github.com/rate_limit
+   
+   # Retry after reset time
+   make build-backend
+   ```
+
+4. **Manual installation** (advanced):
+   ```bash
+   # Download llama.cpp manually and mount as volume
+   wget https://github.com/ggml-org/llama.cpp/releases/download/.../llama-xxx.tar.gz
+   # Extract to local directory, then mount in docker-compose
+   ```
 
 **Symptoms:**
 ```

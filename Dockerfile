@@ -28,6 +28,10 @@ RUN mkdir -p /data/llamacpp/.llamacpp/models \
 ENV LLAMACPP_HOME=/data/llamacpp/.llamacpp
 ENV PATH="${LLAMACPP_HOME}/bin:${PATH}"
 
+# Pre-install llama.cpp during build to avoid GitHub API rate limits at runtime
+# This downloads the llama.cpp binary from GitHub releases
+RUN llamacpp install || echo "llama.cpp install failed - will retry at runtime"
+
 # Expose ports
 # 8000: llama.cpp server
 # 8080: load balancer proxy

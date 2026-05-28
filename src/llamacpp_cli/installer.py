@@ -85,12 +85,24 @@ def install_llamacpp() -> bool:
 
     print(f"Fetching latest llama.cpp release for {system} {machine}...")
 
+    # Support GitHub token to bypass rate limits
+    headers = {}
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+
     try:
-        resp = requests.get(_RELEASE_API, timeout=15, verify=_SSL_VERIFY)
+        resp = requests.get(_RELEASE_API, timeout=15, verify=_SSL_VERIFY, headers=headers)
         resp.raise_for_status()
         release = resp.json()
     except requests.RequestException as e:
         print(f"Error fetching release info: {e}")
+        if "rate limit" in str(e).lower():
+            print("\nGitHub API rate limit exceeded.")
+            print("Solutions:")
+            print("  1. Wait an hour and try again")
+            print("  2. Set GITHUB_TOKEN environment variable with a personal access token")
+            print("  3. Use pre-built Docker image (llama.cpp is pre-installed)")
         return False
 
     asset = _find_release_asset(release.get("assets", []), pattern)
