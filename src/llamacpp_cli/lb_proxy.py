@@ -476,8 +476,15 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         return await _forward_request(request, backend, state)
 
     @app.get("/v1/models")
-    async def list_models() -> JSONResponse:
+    async def list_models(request: Request) -> JSONResponse:
         """Aggregate models from all healthy backends."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
         models_set = set()
         async with state.get_lock():
             for backend in state.backends:
@@ -500,8 +507,15 @@ def create_lb_app(state: ProxyState) -> FastAPI:
 
     @app.get("/backends")
     @app.get("/v1/backends")
-    async def list_backends() -> JSONResponse:
+    async def list_backends(request: Request) -> JSONResponse:
         """List all backends and their status (load-aware)."""
+        # Validate API key
+        if not state.validate_api_key(request):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide: Authorization: Bearer YOUR_API_KEY",
+            )
+
         async with state.get_lock():
             backends_data = [
                 {
