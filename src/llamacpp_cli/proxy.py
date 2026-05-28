@@ -36,6 +36,11 @@ class ProxyState:
     ready_event: asyncio.Event = field(default_factory=asyncio.Event)
     server_port: int = 8081
     ctx_size: int | None = None
+    parallel: int | None = None
+    threads: int | None = None
+    batch_size: int | None = None
+    mlock: bool = True
+    numa: bool = False
     extra_args: list[str] = field(default_factory=list)
     startup_timeout: float = 120.0
     # Persistent HTTP client — must outlive individual StreamingResponse bodies.
@@ -89,12 +94,32 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
             model_path = model_info["path"]
 
         # Start llama-server on the internal port.
+        # Build extra args with CPU optimizations
+        extra_cmd_args = list(state.extra_args or [])
+
+        # Add optimization flags if not already in extra_args
+        if state.parallel is not None and '--parallel' not in extra_cmd_args and '-np' not in extra_cmd_args:
+            extra_cmd_args.extend(['--parallel', str(state.parallel)])
+
+        if state.threads is not None and '--threads' not in extra_cmd_args and '-t' not in extra_cmd_args:
+            extra_cmd_args.extend(['--threads', str(state.threads)])
+            extra_cmd_args.extend(['--threads-batch', str(state.threads)])
+
+        if state.batch_size is not None and '--batch-size' not in extra_cmd_args and '-b' not in extra_cmd_args:
+            extra_cmd_args.extend(['--batch-size', str(state.batch_size)])
+
+        if state.mlock and '--mlock' not in extra_cmd_args and '--no-mmap' not in extra_cmd_args:
+            extra_cmd_args.append('--mlock')
+
+        if state.numa and '--numa' not in extra_cmd_args:
+            extra_cmd_args.extend(['--numa', 'numactl'])
+
         cmd = build_server_cmd(
             model_path,
             host="127.0.0.1",
             port=state.server_port,
             ctx_size=state.ctx_size,
-            extra_args=state.extra_args or None,
+            extra_args=extra_cmd_args,
         )
         print(f"[proxy] Starting llama-server on port {state.server_port} with {canonical!r}")
         state.server_proc = subprocess.Popen(cmd)
@@ -221,6 +246,11 @@ def run_proxy(
     server_port: int = 8081,
     default_model: str | None = None,
     ctx_size: int | None = None,
+    parallel: int | None = None,
+    threads: int | None = None,
+    batch_size: int | None = None,
+    mlock: bool = True,
+    numa: bool = False,
     extra_args: list[str] | None = None,
     startup_timeout: float = 120.0,
 ) -> None:
@@ -256,6 +286,11 @@ def run_proxy(
     state = ProxyState(
         server_port=server_port,
         ctx_size=ctx_size,
+        parallel=parallel,
+        threads=threads,
+        batch_size=batch_size,
+        mlock=mlock,
+        numa=numa,
         extra_args=extra_args or [],
         startup_timeout=startup_timeout,
     )

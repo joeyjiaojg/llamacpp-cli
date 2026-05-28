@@ -59,16 +59,52 @@ def run(
 
 
 @cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
-@click.option("--host", default="127.0.0.1", help="Host to bind.")
+@click.option("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0 for network access).")
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="llama-server port (auto-managed).")
 @click.option("--model", "-m", default=None, help="Model to pre-load at startup.")
+@click.option(
+    "--preset",
+    type=click.Choice(['code', 'chat', 'fast', 'max-context']),
+    default='code',
+    help="Optimization preset (code=16K ctx, chat=8K ctx, fast=4K ctx, max-context=32K ctx).",
+)
 @click.option(
     "--ctx-size",
     "-c",
     default=None,
     type=int,
-    help="Context window size (overrides model default).",
+    help="Context window size (overrides preset default).",
+)
+@click.option(
+    "--parallel",
+    default=None,
+    type=int,
+    help="Max concurrent requests (overrides preset default).",
+)
+@click.option(
+    "--threads",
+    "-t",
+    default=None,
+    type=int,
+    help="CPU threads to use (default: auto-detect all cores).",
+)
+@click.option(
+    "--batch-size",
+    "-b",
+    default=None,
+    type=int,
+    help="Batch size for prompt processing (overrides preset default).",
+)
+@click.option(
+    "--mlock/--no-mlock",
+    default=True,
+    help="Lock model in RAM to prevent swapping (default: enabled).",
+)
+@click.option(
+    "--numa/--no-numa",
+    default=None,
+    help="Enable NUMA optimization for multi-socket systems (default: auto-detect).",
 )
 @click.option(
     "--startup-timeout",
@@ -84,27 +120,83 @@ def serve(
     port: int,
     server_port: int,
     model: str | None,
+    preset: str,
     ctx_size: int | None,
+    parallel: int | None,
+    threads: int | None,
+    batch_size: int | None,
+    mlock: bool,
+    numa: bool | None,
     startup_timeout: float,
 ) -> None:
-    """Start the llama.cpp server (auto-loads models on demand like Ollama).
+    """Start the llama.cpp server with CPU-optimized presets.
+
+    Presets optimize for different use cases:
+      - code: 16K context, 2-4 parallel requests (default, best for code tasks)
+      - chat: 8K context, 4-6 parallel requests (conversational workloads)
+      - fast: 4K context, 6-8 parallel requests (quick queries, max concurrency)
+      - max-context: 32K context, 1 parallel request (large repos, slower)
 
     Extra args after -- are forwarded to llama-server, e.g.:
 
-        llamacpp serve --model qwen3.5 -- -t 8 -tb 4
-        llamacpp serve -m qwen3:14b -c 8192
+        llamacpp serve --preset code --model qwen3.5
+        llamacpp serve --preset max-context -m qwen3:14b
+        llamacpp serve --ctx-size 32768 --parallel 1
     """
     from .installer import ensure_llamacpp
     from .proxy import run_proxy
+    from .utils import get_cpu_server_config, get_cpu_count, detect_numa
 
     if not ensure_llamacpp():
         return
+
+    # Load preset configuration
+    config = get_cpu_server_config(preset)
+
+    # Override with explicit options
+    if ctx_size is not None:
+        config['ctx_size'] = ctx_size
+    if parallel is not None:
+        config['parallel'] = parallel
+    if threads is not None:
+        config['threads'] = threads
+    else:
+        config['threads'] = get_cpu_count()
+    if batch_size is not None:
+        config['batch_size'] = batch_size
+    if numa is not None:
+        config['numa'] = numa
+    elif 'numa' not in config:
+        config['numa'] = detect_numa()
+
+    config['mlock'] = mlock
+
+    # Display configuration
+    click.echo(f"Starting llama.cpp server with preset '{preset}':")
+    click.echo(f"  Host: {host}:{port}")
+    click.echo(f"  Context: {config['ctx_size']} tokens")
+    click.echo(f"  Parallel requests: {config['parallel']}")
+    click.echo(f"  CPU threads: {config['threads']}")
+    click.echo(f"  Batch size: {config['batch_size']}")
+    click.echo(f"  Memory lock: {'enabled' if config['mlock'] else 'disabled'}")
+    click.echo(f"  NUMA: {'enabled' if config['numa'] else 'disabled'}")
+
+    if preset == 'max-context':
+        click.echo("⚠️  Warning: Large context (32K) on CPU will be slow!")
+    if model:
+        click.echo(f"  Pre-loading model: {model}")
+
     run_proxy(
         host=host,
         port=port,
         server_port=server_port,
         default_model=model,
-        ctx_size=ctx_size,
+        ctx_size=config['ctx_size'],
+        parallel=config['parallel'],
+        threads=config['threads'],
+        batch_size=config['batch_size'],
+        mlock=config['mlock'],
+        numa=config['numa'],
         extra_args=ctx.args or None,
         startup_timeout=startup_timeout,
     )
