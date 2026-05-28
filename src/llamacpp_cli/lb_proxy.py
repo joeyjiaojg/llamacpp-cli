@@ -38,6 +38,9 @@ class Backend:
     active_requests: int = 0
     healthy: bool = True
     last_health_check: float = 0.0
+    consecutive_failures: int = 0
+    consecutive_successes: int = 0
+    checking: bool = False
 
     @property
     def url(self) -> str:
@@ -53,8 +56,18 @@ class ProxyState:
 
     backends: list[Backend] = field(default_factory=list)
     backends_lock: asyncio.Lock | None = None  # Created lazily in the correct event loop
-    http_client: httpx.AsyncClient = field(default_factory=lambda: httpx.AsyncClient(timeout=30.0))
-    health_check_interval: float = 10.0
+    http_client: httpx.AsyncClient = field(
+        default_factory=lambda: httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(
+                max_connections=200,  # Up from default 100
+                max_keepalive_connections=50,  # Up from default 20
+                keepalive_expiry=30.0,  # Keep connections alive longer
+            ),
+            transport=httpx.AsyncHTTPTransport(retries=1),  # Built-in retry
+        )
+    )
+    health_check_interval: float = 20.0  # Increased from 10.0 for stability
     health_check_task: asyncio.Task | None = None
     config_path: Path | None = None
     config_watch_task: asyncio.Task | None = None
@@ -99,7 +112,7 @@ async def _check_backend_health(
 
     try:
         # Check /v1/models to validate it's an OpenAI-compatible server
-        resp = await client.get(f"{backend.url}/v1/models", headers=headers, timeout=5.0)
+        resp = await client.get(f"{backend.url}/v1/models", headers=headers, timeout=10.0)
         if resp.status_code == 200:
             try:
                 data = resp.json()
@@ -134,7 +147,7 @@ async def _check_backend_health(
 async def _refresh_backend_models(backend: Backend, client: httpx.AsyncClient) -> None:
     """Query a backend for available models and update its model list."""
     try:
-        resp = await client.get(f"{backend.url}/v1/models", timeout=5.0)
+        resp = await client.get(f"{backend.url}/v1/models", timeout=10.0)
         if resp.status_code == 200:
             data = resp.json()
             if "data" in data and isinstance(data["data"], list):
@@ -144,30 +157,62 @@ async def _refresh_backend_models(backend: Backend, client: httpx.AsyncClient) -
 
 
 async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> None:
-    """Periodically check backend health and refresh model lists."""
+    """Periodically check backend health and refresh model lists.
+
+    Uses consecutive failure/success thresholds to avoid flapping:
+    - Requires 3 consecutive failures before marking unhealthy
+    - Requires 2 consecutive successes before marking healthy
+    """
+    FAILURE_THRESHOLD = 3
+    SUCCESS_THRESHOLD = 2
+
     while True:
         await asyncio.sleep(state.health_check_interval)
         async with state.get_lock():
             for backend in state.backends:
+                # Skip if already checking or too soon
                 now = time.time()
-                if now - backend.last_health_check < state.health_check_interval:
+                if backend.checking or now - backend.last_health_check < state.health_check_interval:
                     continue
 
-                previous_healthy = backend.healthy
-                healthy = await _check_backend_health(backend, state.http_client, auth_key)
-                backend.healthy = healthy
-                backend.last_health_check = now
+                # Prevent concurrent checks
+                backend.checking = True
+                try:
+                    healthy = await _check_backend_health(backend, state.http_client, auth_key)
+                    backend.last_health_check = now
 
-                # Only log if status changed
-                if healthy != previous_healthy:
+                    # Update consecutive counters
                     if healthy:
-                        await _refresh_backend_models(backend, state.http_client)
-                        print(f"{_timestamp()} [lb-proxy] Backend {backend.url} became healthy, models: {backend.models}", flush=True)
+                        backend.consecutive_successes += 1
+                        backend.consecutive_failures = 0
                     else:
-                        print(f"{_timestamp()} [lb-proxy] Backend {backend.url} became unhealthy", flush=True)
-                elif healthy:
-                    # Refresh models silently if still healthy
-                    await _refresh_backend_models(backend, state.http_client)
+                        backend.consecutive_failures += 1
+                        backend.consecutive_successes = 0
+
+                    # Only change healthy status after thresholds are met
+                    should_mark_healthy = not backend.healthy and backend.consecutive_successes >= SUCCESS_THRESHOLD
+                    should_mark_unhealthy = backend.healthy and backend.consecutive_failures >= FAILURE_THRESHOLD
+
+                    if should_mark_healthy:
+                        backend.healthy = True
+                        await _refresh_backend_models(backend, state.http_client)
+                        print(
+                            f"{_timestamp()} [lb-proxy] Backend {backend.url} became healthy "
+                            f"(after {backend.consecutive_successes} consecutive successes), models: {backend.models}",
+                            flush=True
+                        )
+                    elif should_mark_unhealthy:
+                        backend.healthy = False
+                        print(
+                            f"{_timestamp()} [lb-proxy] Backend {backend.url} became unhealthy "
+                            f"(after {backend.consecutive_failures} consecutive failures)",
+                            flush=True
+                        )
+                    elif backend.healthy:
+                        # Refresh models silently if still healthy
+                        await _refresh_backend_models(backend, state.http_client)
+                finally:
+                    backend.checking = False
 
 
 async def _config_watch_loop(state: ProxyState, auth_key: str | None = None) -> None:
@@ -183,13 +228,13 @@ async def _config_watch_loop(state: ProxyState, auth_key: str | None = None) -> 
             current_mtime = state.config_path.stat().st_mtime
             if current_mtime > last_mtime:
                 print(f"{_timestamp()} [lb-proxy] Config file changed, reloading backends…")
-                await _load_backends_from_config(state)
+                await _load_backends_from_config(state, auth_key)
                 last_mtime = current_mtime
         except Exception as exc:
             print(f"{_timestamp()} [lb-proxy] Error watching config: {exc}")
 
 
-async def _load_backends_from_config(state: ProxyState) -> None:
+async def _load_backends_from_config(state: ProxyState, auth_key: str | None = None) -> None:
     """Load backends from config file."""
     if not state.config_path or not state.config_path.exists():
         return
@@ -554,7 +599,7 @@ def run_lb_proxy(
                 print(f"{_timestamp()} [lb-proxy] Invalid backend '{backend_str}': {exc}")
 
     # Initial load from config
-    asyncio.run(_load_backends_from_config(state))
+    asyncio.run(_load_backends_from_config(state, auth_key))
 
     # Start the FastAPI app
     app = create_lb_app(state)

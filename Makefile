@@ -14,6 +14,7 @@ MODEL_ARGS ?=
 # Default subnet for proxy discovery (override with: make start-proxy SUBNET=10.0.0.0/24)
 SUBNET ?= 192.168.1.0/24
 PROXY_PORT ?= 8080
+API_KEY ?=
 
 help:
 	@echo "llamacpp-cli Docker Management"
@@ -31,6 +32,8 @@ help:
 	@echo "Proxy Server Commands (run on ONE proxy machine):"
 	@echo "  make build-proxy           Build proxy Docker image"
 	@echo "  make start-proxy           Start lb-proxy with subnet discovery"
+	@echo "  make start-proxy-with-auth Start lb-proxy with generated API key"
+	@echo "  make generate-api-key      Generate a secure API key"
 	@echo "  make stop-proxy            Stop lb-proxy"
 	@echo "  make logs-proxy            View proxy logs"
 	@echo "  make status-proxy          Show backend status via proxy"
@@ -44,11 +47,14 @@ help:
 	@echo "Environment Variables:"
 	@echo "  SUBNET       Subnet(s) to scan - supports comma-separated (default: 192.168.1.0/24)"
 	@echo "  PROXY_PORT   Proxy listen port (default: 8080)"
+	@echo "  API_KEY      Client API key for authentication (optional)"
 	@echo "  MODEL        Model name for pull command"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make start-backend MODEL_ARGS='--model qwen3.5'"
 	@echo "  make start-proxy SUBNET=10.231.213.0/24,10.231.214.0/24,10.231.215.0/24 PROXY_PORT=8081"
+	@echo "  make start-proxy-with-auth SUBNET=10.231.213.0/24 PROXY_PORT=8081"
+	@echo "  make start-proxy API_KEY=your-key-here SUBNET=10.231.213.0/24 PROXY_PORT=8081"
 	@echo "  make pull-model MODEL=qwen3.5"
 
 # ============================================================================
@@ -107,18 +113,57 @@ build-proxy:
 	@echo "Building proxy Docker image..."
 	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build
 
+generate-api-key:
+	@python3 -c "import secrets; print('Generated API Key:', secrets.token_urlsafe(32))"
+
 start-proxy:
 	@echo "Starting lb-proxy with subnet discovery..."
 	@echo "Scanning subnet: $(SUBNET)"
 	@echo "Proxy port: $(PROXY_PORT)"
-	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
-		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d
+	@if [ -n "$(API_KEY)" ]; then \
+		echo "API Key: $(API_KEY)"; \
+		echo "Clients must authenticate with: Authorization: Bearer $(API_KEY)"; \
+		DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) API_KEY=$(API_KEY) \
+			$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
+	else \
+		echo "No API key set - proxy will allow unauthenticated access"; \
+		echo "Use: make start-proxy-with-auth to generate and use an API key"; \
+		echo "Or: make start-proxy API_KEY=your-key SUBNET=..."; \
+		DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) \
+			$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
+	fi
 	@echo ""
 	@echo "Proxy started! Access at:"
 	@echo "  http://localhost:$(PROXY_PORT)/v1/models"
 	@echo "  http://localhost:$(PROXY_PORT)/backends"
 	@echo ""
 	@echo "Wait 10-15 seconds for backend discovery..."
+
+start-proxy-with-auth:
+	@echo "Generating secure API key..."
+	@API_KEY=$$(python3 -c "import secrets; print(secrets.token_urlsafe(32))"); \
+	echo ""; \
+	echo "========================================"; \
+	echo "Generated API Key: $$API_KEY"; \
+	echo "========================================"; \
+	echo ""; \
+	echo "Save this key! Clients must use:"; \
+	echo "  Authorization: Bearer $$API_KEY"; \
+	echo ""; \
+	echo "Starting lb-proxy with subnet discovery..."; \
+	echo "Scanning subnet: $(SUBNET)"; \
+	echo "Proxy port: $(PROXY_PORT)"; \
+	DISCOVER_SUBNET=$(SUBNET) PROXY_PORT=$(PROXY_PORT) API_KEY=$$API_KEY \
+		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
+	echo ""; \
+	echo "Proxy started! Access at:"; \
+	echo "  http://localhost:$(PROXY_PORT)/v1/models"; \
+	echo "  http://localhost:$(PROXY_PORT)/backends"; \
+	echo ""; \
+	echo "Example curl command:"; \
+	echo "  curl -H \"Authorization: Bearer $$API_KEY\" http://localhost:$(PROXY_PORT)/v1/models"; \
+	echo ""; \
+	echo "Wait 10-15 seconds for backend discovery..."
 
 stop-proxy:
 	@echo "Stopping lb-proxy..."

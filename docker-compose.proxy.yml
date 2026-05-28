@@ -12,13 +12,26 @@ services:
       # Subnet to scan for backends (override via env var or command)
       - DISCOVER_SUBNET=${DISCOVER_SUBNET:-192.168.1.0/24}
       - PROXY_PORT=${PROXY_PORT:-8080}
+      - API_KEY=${API_KEY:-}
     command: >
-      llamacpp lb-proxy
-        --host 0.0.0.0
-        --port ${PROXY_PORT:-8080}
-        --discover-subnet ${DISCOVER_SUBNET:-192.168.1.0/24}
-        --discover-port 8000
-        --config /data/llamacpp/.llamacpp/lb_backends.json
+      sh -c "
+      if [ -n \"$API_KEY\" ]; then
+        llamacpp lb-proxy
+          --host 0.0.0.0
+          --port ${PROXY_PORT:-8080}
+          --discover-subnet ${DISCOVER_SUBNET:-192.168.1.0/24}
+          --discover-port 8000
+          --config /data/llamacpp/.llamacpp/lb_backends.json
+          --api-key \"$API_KEY\"
+      else
+        llamacpp lb-proxy
+          --host 0.0.0.0
+          --port ${PROXY_PORT:-8080}
+          --discover-subnet ${DISCOVER_SUBNET:-192.168.1.0/24}
+          --discover-port 8000
+          --config /data/llamacpp/.llamacpp/lb_backends.json
+      fi
+      "
     restart: unless-stopped
 
 volumes:
