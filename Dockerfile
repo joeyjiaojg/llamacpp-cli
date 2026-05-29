@@ -1,9 +1,30 @@
 # syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
-# Use China mirror for apt when CHINA=1 (e.g. make build-backend CHINA=1)
-ARG CHINA=0
-RUN if [ "${CHINA}" = "1" ]; then \
+# Auto-detect network: TCP-connect to deb.debian.org:80 with 2s timeout.
+# If slow/unreachable, switch to Tsinghua mirror for apt and pip.
+# Override with: --build-arg MIRROR_CHECK=skip  (force default mirrors)
+#                --build-arg MIRROR_CHECK=china  (force China mirrors)
+ARG MIRROR_CHECK=auto
+RUN USE_CHINA=0 && \
+    if [ "${MIRROR_CHECK}" = "china" ]; then \
+        USE_CHINA=1 && echo "==> Forced China mirrors"; \
+    elif [ "${MIRROR_CHECK}" = "auto" ]; then \
+        RTT=$(python3 -c " \
+import socket, time; \
+t=time.time(); \
+s=socket.socket(); \
+s.settimeout(2); \
+ok=0; \
+try: s.connect(('deb.debian.org', 80)); ok=1 \
+except: pass; \
+s.close(); \
+print(int((time.time()-t)*1000) if ok else 9999)" 2>/dev/null || echo 9999) && \
+        echo "==> deb.debian.org TCP connect: ${RTT}ms" && \
+        if [ "${RTT}" -gt 200 ]; then USE_CHINA=1; fi; \
+    fi && \
+    if [ "${USE_CHINA}" = "1" ]; then \
+        echo "==> Using Tsinghua mirrors for apt + pip" && \
         sed -i \
             's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; \
              s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
@@ -12,8 +33,10 @@ RUN if [ "${CHINA}" = "1" ]; then \
             's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; \
              s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
             /etc/apt/sources.list 2>/dev/null || true; \
-        echo "==> Using Tsinghua mirror for apt"; \
-    fi
+    else \
+        echo "==> Using default mirrors"; \
+    fi && \
+    echo "${USE_CHINA}" > /tmp/use_china
 
 # System dependencies
 RUN apt-get update && \
@@ -59,7 +82,7 @@ WORKDIR /app
 # ---------------------------------------------------------------------------
 COPY pyproject.toml ./
 RUN mkdir -p src/llamacpp_cli && touch src/llamacpp_cli/__init__.py && \
-    if [ "${CHINA}" = "1" ]; then \
+    if [ "$(cat /tmp/use_china 2>/dev/null)" = "1" ]; then \
         pip install --no-cache-dir -e . \
             -i https://pypi.tuna.tsinghua.edu.cn/simple \
             --trusted-host pypi.tuna.tsinghua.edu.cn; \
