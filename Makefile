@@ -86,7 +86,7 @@ start-backend:
 	@echo "==> Starting backend  socket=$(SOCKET_ID)  port=$(PORT)"
 	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
 	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) SERVER_PORT=$(shell expr $(PORT) + 100) MODEL_ARGS="$(MODEL_ARGS)" \
-		$(DOCKER_COMPOSE) -f docker-compose.backend.yml up -d
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml up -d --force-recreate
 	@echo ""
 	@echo "  Test:  curl http://localhost:$(PORT)/health"
 	@echo "  Logs:  make logs-backend"
@@ -108,10 +108,10 @@ start-backend-dual:
 	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
 	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 MODEL_ARGS="$(MODEL_ARGS)" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
-		-p llamacpp-backend-0 up -d
+		-p llamacpp-backend-0 up -d --force-recreate
 	SOCKET_ID=1 PORT=8001 SERVER_PORT=8101 MODEL_ARGS="$(MODEL_ARGS)" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
-		-p llamacpp-backend-1 up -d
+		-p llamacpp-backend-1 up -d --force-recreate
 	@echo ""
 	@echo "  Socket 0:  curl http://localhost:8000/health"
 	@echo "  Socket 1:  curl http://localhost:8001/health"
