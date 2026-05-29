@@ -425,6 +425,36 @@ def show(model: str) -> None:
     default=False,
     help="Disable model warming even if --warm-models is set.",
 )
+@click.option(
+    "--allowed-ips",
+    default=None,
+    help=(
+        "Comma-separated list of allowed IP addresses or CIDR ranges "
+        "(e.g., 10.0.0.0/8,192.168.0.0/16). "
+        "When set, requests from IPs not in the list are rejected with HTTP 403. "
+        "Both IPv4 and IPv6 addresses/ranges are supported."
+    ),
+)
+@click.option(
+    "--request-log-file",
+    default=None,
+    help=(
+        "Path to JSONL file for request logging. "
+        "Logs can be replayed with: llamacpp lb-proxy replay --log-file <path> --target <url>"
+    ),
+)
+@click.option(
+    "--request-log-failed-only",
+    is_flag=True,
+    default=False,
+    help="When request logging is enabled, only log requests that result in HTTP 4xx/5xx.",
+)
+@click.option(
+    "--request-log-max",
+    default=1000,
+    type=int,
+    help="Maximum number of requests to keep in the in-memory ring buffer (default: 1000).",
+)
 def lb_proxy(
     host: str,
     port: int,
@@ -440,6 +470,10 @@ def lb_proxy(
     max_response_tokens: int,
     warm_models: str | None,
     no_warm: bool,
+    allowed_ips: str | None,
+    request_log_file: str | None,
+    request_log_failed_only: bool,
+    request_log_max: int,
 ) -> None:
     """Start a multi-backend load balancer proxy.
 
