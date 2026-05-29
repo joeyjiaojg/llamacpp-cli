@@ -132,10 +132,10 @@ async def add_request_tracing(request: Request, call_next):
     try:
         if request.method == "POST":
             body = await request.body()
-            # Reset body for downstream handlers
-            async def receive():
-                return {"type": "http.request", "body": body}
-            request._receive = receive
+            # NOTE: do NOT replace request._receive here.
+            # Request.body() caches internally; replacing _receive with a static
+            # "http.request" stub breaks StreamingResponse.listen_for_disconnect()
+            # which calls receive() expecting "http.disconnect" when the client goes away.
 
             # Parse body
             import json
