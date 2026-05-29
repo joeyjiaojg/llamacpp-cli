@@ -426,6 +426,13 @@ def show(model: str) -> None:
     help="Disable model warming even if --warm-models is set.",
 )
 @click.option(
+    "--rediscover-interval",
+    default=60,
+    type=int,
+    show_default=True,
+    help="Seconds between periodic subnet rescans to pick up backends that start late. 0 to disable.",
+)
+@click.option(
     "--allowed-ips",
     default=None,
     help=(
@@ -470,6 +477,7 @@ def lb_proxy(
     max_response_tokens: int,
     warm_models: str | None,
     no_warm: bool,
+    rediscover_interval: int,
     allowed_ips: str | None,
     request_log_file: str | None,
     request_log_failed_only: bool,
@@ -557,6 +565,7 @@ def lb_proxy(
         max_response_tokens=max_response_tokens,
         warm_models=warm_model_list,
         no_warm=no_warm,
+        rediscover_interval=float(rediscover_interval),
         allowed_ips=allowed_ip_list,
         request_log_file=request_log_file,
         request_log_failed_only=request_log_failed_only,

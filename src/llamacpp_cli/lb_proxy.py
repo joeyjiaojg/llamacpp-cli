@@ -497,6 +497,10 @@ class ProxyState:
     model_warmer: ModelWarmer | None = None  # Optional model warmer for cold-start reduction
     allowed_cidrs: list[str] | None = None  # IP whitelist (None = allow all)
     request_logger: RequestLogger | None = None  # Optional request logger for replay/debugging
+    discover_subnets: list[str] = field(default_factory=list)   # Subnets for periodic rediscovery
+    discover_ports: list[int] = field(default_factory=lambda: [8000])  # Ports to probe
+    rediscover_interval: float = 60.0  # Seconds between rediscovery sweeps
+    rediscover_task: asyncio.Task | None = None
 
     def get_lock(self) -> asyncio.Lock:
         """Get or create the backends lock in the current event loop."""
@@ -664,6 +668,61 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
                         await _refresh_backend_models(backend, state.http_client, auth_key)
                 finally:
                     backend.checking = False
+
+
+async def _rediscovery_loop(state: ProxyState) -> None:
+    """Periodically rescan subnets for new backends.
+
+    Runs every state.rediscover_interval seconds. Only adds backends not already
+    known — never removes backends (health check handles that).
+    """
+    import ipaddress
+
+    while True:
+        await asyncio.sleep(state.rediscover_interval)
+
+        if not state.discover_subnets:
+            continue
+
+        for subnet in state.discover_subnets:
+            try:
+                network = ipaddress.ip_network(subnet, strict=False)
+            except ValueError:
+                continue
+
+            for host in network.hosts():
+                for port in state.discover_ports:
+                    # Skip hosts we already know about
+                    async with state.get_lock():
+                        known = any(
+                            b.host == str(host) and b.port == port
+                            for b in state.backends
+                        )
+                    if known:
+                        continue
+
+                    # Probe the host:port
+                    candidate = Backend(host=str(host), port=port)
+                    healthy = await _check_backend_health(
+                        candidate, state.http_client, state.auth_key
+                    )
+                    if healthy:
+                        await _refresh_backend_models(
+                            candidate, state.http_client, state.auth_key
+                        )
+                        candidate.last_health_check = time.time()
+                        async with state.get_lock():
+                            # Double-check after lock (another task may have added it)
+                            if not any(
+                                b.host == candidate.host and b.port == candidate.port
+                                for b in state.backends
+                            ):
+                                state.backends.append(candidate)
+                                print(
+                                    f"{_timestamp()} [lb-proxy] Rediscovered new backend:"
+                                    f" {candidate.url}, models: {candidate.models}",
+                                    flush=True,
+                                )
 
 
 async def _config_watch_loop(state: ProxyState, auth_key: str | None = None) -> None:
@@ -1077,6 +1136,15 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         if state.request_queue:
             queue_worker_task = asyncio.create_task(_queue_worker_loop(state))
 
+        # Start periodic rediscovery (picks up backends that start after initial scan)
+        if state.discover_subnets:
+            state.rediscover_task = asyncio.create_task(_rediscovery_loop(state))
+            print(
+                f"{_timestamp()} [lb-proxy] Periodic rediscovery every"
+                f" {state.rediscover_interval:.0f}s for {len(state.discover_subnets)} subnet(s)",
+                flush=True,
+            )
+
         # Start model warmer
         if state.model_warmer:
             if state.model_warmer.warm_on_startup:
@@ -1099,6 +1167,8 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             state.config_watch_task.cancel()
         if queue_worker_task:
             queue_worker_task.cancel()
+        if state.rediscover_task:
+            state.rediscover_task.cancel()
         if state.model_warmer:
             state.model_warmer.stop()
 
@@ -2280,6 +2350,7 @@ def run_lb_proxy(
     max_response_tokens: int = 32000,
     warm_models: list[str] | None = None,
     no_warm: bool = False,
+    rediscover_interval: float = 60.0,
     allowed_ips: list[str] | None = None,
     request_log_file: str | None = None,
     request_log_failed_only: bool = False,
@@ -2415,7 +2486,15 @@ def run_lb_proxy(
     # Start the FastAPI app
     app = create_lb_app(state)
 
-    # Schedule background discovery tasks
+    # Store subnet/port info for periodic rediscovery (backends that start later)
+    if discover_subnet:
+        subnets = [s.strip() for s in discover_subnet.split(",")]
+        ports = [int(p.strip()) for p in str(discover_port).split(",") if p.strip().isdigit()] or [8000]
+        state.discover_subnets = subnets
+        state.discover_ports = ports
+        state.rediscover_interval = rediscover_interval if rediscover_interval > 0 else float("inf")
+
+    # Schedule ONE-SHOT background discovery tasks (initial scan)
     discover_tasks = []
     if discover_subnet:
         subnets = [s.strip() for s in discover_subnet.split(",")]
