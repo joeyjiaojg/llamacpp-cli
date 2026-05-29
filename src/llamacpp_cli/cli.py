@@ -67,6 +67,7 @@ def run(
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="llama-server port (auto-managed).")
 @click.option("--model", "-m", default=None, help="Model to pre-load at startup.")
+@click.option("--draft-model", default=None, help="Draft model for speculative decoding (model name or path).")
 @click.option(
     "--preset",
     type=click.Choice(["code", "chat", "fast", "max-context"]),
@@ -141,6 +142,7 @@ def serve(
     port: int,
     server_port: int,
     model: str | None,
+    draft_model: str | None,
     preset: str,
     ctx_size: int | None,
     parallel: int | None,
@@ -262,6 +264,30 @@ def serve(
         click.echo("Warning: Large context (32K) on CPU will be slow!")
     if model:
         click.echo(f"  Pre-loading model: {model}")
+
+    # Resolve draft model name → path and inject as --model-draft for llama-server
+    if draft_model:
+        from .db import get_model as _get_model
+        from .run import _is_local_path
+        from .model_manager import pull_model as _pull_model
+
+        if _is_local_path(draft_model):
+            draft_path = draft_model
+        else:
+            draft_info = _get_model(draft_model)
+            if not draft_info:
+                click.echo(f"  Pulling draft model: {draft_model}")
+                _pull_model(draft_model)
+                draft_info = _get_model(draft_model)
+            if not draft_info:
+                click.echo(f"  ERROR: Could not find or pull draft model '{draft_model}'", err=True)
+                return
+            draft_path = draft_info["path"]
+
+        click.echo(f"  Draft model: {draft_model}")
+        extra_args = list(extra_args or [])
+        if "--model-draft" not in extra_args and "-md" not in extra_args:
+            extra_args.extend(["--model-draft", draft_path])
 
     # Merge GPU args into extra_args (before user-supplied extra args)
     final_extra_args = gpu_cfg_args + extra_args if gpu_cfg_args else (extra_args or None)
