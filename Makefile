@@ -10,9 +10,6 @@
 # ---------------------------------------------------------------------------
 DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-# Enable BuildKit for --mount=type=cache support in Dockerfile
-export DOCKER_BUILDKIT=1
-
 # ---------------------------------------------------------------------------
 # Defaults (all overridable on the command line)
 # ---------------------------------------------------------------------------
