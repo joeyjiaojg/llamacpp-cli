@@ -85,7 +85,7 @@ build-backend:
 start-backend:
 	@echo "==> Starting backend  socket=$(SOCKET_ID)  port=$(PORT)"
 	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
-	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) MODEL_ARGS="$(MODEL_ARGS)" \
+	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) SERVER_PORT=$(shell expr $(PORT) + 100) MODEL_ARGS="$(MODEL_ARGS)" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml up -d
 	@echo ""
 	@echo "  Test:  curl http://localhost:$(PORT)/health"
@@ -93,23 +93,23 @@ start-backend:
 
 stop-backend:
 	@echo "==> Stopping backend  socket=$(SOCKET_ID)  port=$(PORT) ..."
-	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) \
+	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) SERVER_PORT=$(shell expr $(PORT) + 100) \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml down
 
 restart-backend: stop-backend start-backend
 
 logs-backend:
-	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) \
+	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) SERVER_PORT=$(shell expr $(PORT) + 100) \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml logs -f
 
 ## Dual-socket shortcut — two containers: socket 0 on :8000, socket 1 on :8001
 start-backend-dual:
 	@echo "==> Starting backend on BOTH sockets (0->:8000, 1->:8001) ..."
 	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
-	SOCKET_ID=0 PORT=8000 MODEL_ARGS="$(MODEL_ARGS)" \
+	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 MODEL_ARGS="$(MODEL_ARGS)" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
 		-p llamacpp-backend-0 up -d
-	SOCKET_ID=1 PORT=8001 MODEL_ARGS="$(MODEL_ARGS)" \
+	SOCKET_ID=1 PORT=8001 SERVER_PORT=8101 MODEL_ARGS="$(MODEL_ARGS)" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
 		-p llamacpp-backend-1 up -d
 	@echo ""

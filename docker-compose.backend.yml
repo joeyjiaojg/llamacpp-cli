@@ -27,15 +27,17 @@ services:
       - LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
       - SOCKET_ID=${SOCKET_ID:-0}
       - PORT=${PORT:-8000}
+      - SERVER_PORT=${SERVER_PORT:-8100}
+      - MODEL_ARGS=${MODEL_ARGS:-}
     command:
       - bash
       - -c
       - >-
-        echo "[backend] Starting on socket ${SOCKET_ID:-0}, port ${PORT:-8000}" &&
+        echo "[backend] Starting on socket ${SOCKET_ID:-0}, port ${PORT:-8000}, server-port ${SERVER_PORT:-8100}" &&
         exec llamacpp serve
         --host 0.0.0.0
         --port ${PORT:-8000}
-        --server-port $((${PORT:-8000} + 100))
+        --server-port ${SERVER_PORT:-8100}
         --socket-id ${SOCKET_ID:-0}
         ${MODEL_ARGS}
     restart: unless-stopped
