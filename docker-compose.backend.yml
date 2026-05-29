@@ -1,29 +1,40 @@
 services:
-  # Backend llama.cpp server - run this on each backend machine
+  # Backend llama.cpp server - run this on each backend machine.
+  #
+  # Topology:
+  #   - One container per machine (SOCKET_ID=0 for single-socket, or 0/1 for dual-socket)
+  #   - privileged: true is required so numactl can bind CPU + memory to a specific NUMA node
+  #   - network_mode: host lets the lb-proxy discover this via subnet scan on port 8000
+  #
+  # Dual-socket machines: start TWO containers:
+  #   SOCKET_ID=0 PORT=8000 make start-backend MODEL_ARGS="--model ..."
+  #   SOCKET_ID=1 PORT=8001 make start-backend MODEL_ARGS="--model ..."
+
   llama-server:
     build: .
-    container_name: llamacpp-backend
+    container_name: llamacpp-backend-${SOCKET_ID:-0}
+    privileged: true          # Required for numactl --cpunodebind/--membind
+    network_mode: host        # Port is exposed directly on host; lb-proxy discovers it
+    pid: host                 # Lets numactl see host NUMA topology
     volumes:
-      # Persistent model storage
       - llamacpp-models:/data/llamacpp/.llamacpp/models
-      # llama.cpp binaries
       - llamacpp-bin:/data/llamacpp/.llamacpp/bin
-      # Config directory
       - llamacpp-config:/data/llamacpp/.llamacpp
-    ports:
-      - "8000:8000"  # Expose on host network for lb-proxy to discover
+      - /sys/devices/system/node:/sys/devices/system/node:ro  # NUMA topology
     environment:
       - LLAMACPP_HOME=/data/llamacpp/.llamacpp
       - LLAMACPP_AUTO_INSTALL=true
-      # Direct download URL (bypasses GitHub API rate limits)
       - LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
-      # Optional: disable SSL verification for Hugging Face downloads behind proxy
-      # - LLAMACPP_SSL_VERIFY=false
-      # Optional: GitHub token to avoid API rate limits (alternative to direct URL)
-      # - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - SOCKET_ID=${SOCKET_ID:-0}
+      - PORT=${PORT:-8000}
     command: >
       bash -c "
-        llamacpp serve --host 0.0.0.0 --port 8000 ${MODEL_ARGS}
+        echo '[backend] Starting on socket ${SOCKET_ID:-0}, port ${PORT:-8000}' &&
+        llamacpp serve
+          --host 0.0.0.0
+          --port ${PORT:-8000}
+          --socket-id ${SOCKET_ID:-0}
+          ${MODEL_ARGS}
       "
     restart: unless-stopped
 
