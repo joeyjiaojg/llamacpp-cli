@@ -10,6 +10,9 @@
 # ---------------------------------------------------------------------------
 DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
+# Enable BuildKit for --mount=type=cache support in Dockerfile
+export DOCKER_BUILDKIT=1
+
 # ---------------------------------------------------------------------------
 # Defaults (all overridable on the command line)
 # ---------------------------------------------------------------------------
@@ -84,7 +87,7 @@ help:
 
 build-backend:
 	@echo "==> Building backend image ..."
-	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build --no-cache
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build
 
 ## Single socket (SOCKET_ID=0 by default)
 start-backend:
@@ -149,7 +152,7 @@ start-backend-single:
 
 build-proxy:
 	@echo "==> Building proxy image ..."
-	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build --no-cache
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build
 
 ## No authentication
 start-proxy:
