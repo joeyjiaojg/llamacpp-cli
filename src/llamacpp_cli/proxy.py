@@ -165,6 +165,8 @@ async def _forward_request(request: Request, state: ProxyState) -> Response:
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
+    # Fully consume request body before streaming response to avoid
+    # "Unexpected message received: http.request" errors from Starlette
     body = await request.body()
 
     _HOP_BY_HOP = {
@@ -208,6 +210,7 @@ async def _forward_request(request: Request, state: ProxyState) -> Response:
         status_code=backend_resp.status_code,
         headers=resp_headers,
         media_type=backend_resp.headers.get("content-type"),
+        background=None,
     )
 
 

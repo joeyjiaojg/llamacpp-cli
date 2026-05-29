@@ -56,7 +56,7 @@ def get_model_max_context(model_name: str) -> int:
     elif 'deepseek' in model_lower:
         return 16384  # 16K
     elif 'qwen' in model_lower:
-        return 16384  # 16K typical
+        return 32768  # 32K - handle large contexts
     else:
         return 8192  # Conservative default
 
