@@ -25,7 +25,10 @@ from pydantic import BaseModel, Field
 
 from .config import get_base_dir
 from .conversation_affinity import ConversationAffinity
+from .ip_filter import create_ip_filter_middleware
 from .lb_proxy_logging import add_request_tracing, configure_logging
+from .model_warmer import ModelWarmer
+from .request_logger import RequestLogger, RequestRecord
 from .response_cache import ResponseCache
 
 
@@ -491,6 +494,9 @@ class ProxyState:
     request_queue: RequestQueue | None = None  # Optional request queue
     conversation_affinity: ConversationAffinity | None = None  # Optional conversation affinity
     response_cache: ResponseCache | None = None  # Optional response caching
+    model_warmer: ModelWarmer | None = None  # Optional model warmer for cold-start reduction
+    allowed_cidrs: list[str] | None = None  # IP whitelist (None = allow all)
+    request_logger: RequestLogger | None = None  # Optional request logger for replay/debugging
 
     def get_lock(self) -> asyncio.Lock:
         """Get or create the backends lock in the current event loop."""
@@ -981,6 +987,18 @@ async def _forward_request(request: Request, backend: Backend, state: ProxyState
                     await state.rate_limiter.record_tokens(request, total_tokens)
 
         backend.circuit_breaker.record_success()
+        # Log request after response status is known
+        if state.request_logger:
+            state.request_logger.record(
+                RequestRecord(
+                    timestamp=time.time(),
+                    method=request.method,
+                    path=str(request.url.path),
+                    headers=dict(request.headers),
+                    body=body,
+                    response_status=backend_resp.status_code,
+                )
+            )
         return StreamingResponse(
             _stream(),
             status_code=backend_resp.status_code,
@@ -990,6 +1008,19 @@ async def _forward_request(request: Request, backend: Backend, state: ProxyState
     except Exception as exc:
         backend.active_requests -= 1
         backend.circuit_breaker.record_failure()
+        # Log failed request
+        if state.request_logger:
+            state.request_logger.record(
+                RequestRecord(
+                    timestamp=time.time(),
+                    method=request.method,
+                    path=str(request.url.path),
+                    headers=dict(request.headers),
+                    body=body,
+                    response_status=502,
+                    error=str(exc),
+                )
+            )
         raise HTTPException(status_code=502, detail=f"Backend error: {exc}")
 
 
@@ -1045,6 +1076,21 @@ def create_lb_app(state: ProxyState) -> FastAPI:
         queue_worker_task = None
         if state.request_queue:
             queue_worker_task = asyncio.create_task(_queue_worker_loop(state))
+
+        # Start model warmer
+        if state.model_warmer:
+            if state.model_warmer.warm_on_startup:
+                # Run an immediate warm pass before entering the periodic loop
+                async with state.get_lock():
+                    backends_snapshot = list(state.backends)
+                await state.model_warmer.warm_all_backends(backends_snapshot, state.http_client)
+
+            async def _get_backends() -> list[Backend]:
+                async with state.get_lock():
+                    return list(state.backends)
+
+            state.model_warmer.start(_get_backends, state.http_client)
+
         yield
         # Shutdown
         if state.health_check_task:
@@ -1053,6 +1099,8 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             state.config_watch_task.cancel()
         if queue_worker_task:
             queue_worker_task.cancel()
+        if state.model_warmer:
+            state.model_warmer.stop()
 
     # OpenAPI tags for organization
     tags_metadata = [
@@ -1145,6 +1193,10 @@ curl http://localhost:8080/v1/chat/completions \\
 
     # Structured request tracing middleware
     app.middleware("http")(add_request_tracing)
+
+    # IP whitelist middleware (applied after tracing so blocked requests are still logged)
+    if state.allowed_cidrs:
+        app.middleware("http")(create_ip_filter_middleware(state.allowed_cidrs))
 
     @app.post("/v1/chat/completions", tags=["OpenAI API"])
     async def chat_completions(request: Request) -> Response:
@@ -1761,7 +1813,10 @@ curl http://localhost:8080/v1/chat/completions \\
                 }
                 for b in state.backends
             ]
-        return JSONResponse({"backends": backends_data})
+        result: dict = {"backends": backends_data}
+        if state.model_warmer:
+            result["warming"] = state.model_warmer.get_status()
+        return JSONResponse(result)
 
     @app.get("/stats", tags=["Health & Stats"])
     @app.get("/v1/stats", tags=["Health & Stats"])
@@ -1849,89 +1904,82 @@ curl http://localhost:8080/v1/chat/completions \\
         if format == "json":
             return JSONResponse(stats_data)
 
-        # Otherwise return HTML
-        html = f"""
-<!DOCTYPE html>
+        # Otherwise return live SSE-powered HTML dashboard
+        html = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Load Balancer Stats</title>
     <style>
-        body {{
+        body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
             background: #f5f5f5;
-        }}
-        h1 {{
-            color: #333;
-            border-bottom: 3px solid #4CAF50;
-            padding-bottom: 10px;
-        }}
-        h2 {{
-            color: #555;
-            margin-top: 30px;
-        }}
-        .total-stats {{
+        }
+        h1 { color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }
+        h2 { color: #555; margin-top: 30px; }
+        .connection-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            float: right;
+            margin-top: 8px;
+        }
+        .connection-status.connected { background: #e8f5e9; color: #2e7d32; }
+        .connection-status.disconnected { background: #ffebee; color: #c62828; }
+        .connection-status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+        .connection-status.connected .dot { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .total-stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
             margin: 20px 0;
-        }}
-        .stat-card {{
+        }
+        .stat-card {
             background: white;
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .stat-card .label {{
-            color: #777;
-            font-size: 14px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        .stat-card .value {{
-            color: #333;
-            font-size: 32px;
-            font-weight: bold;
-            margin-top: 5px;
-        }}
-        table {{
+        }
+        .stat-card .label { color: #777; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-card .value { color: #333; font-size: 32px; font-weight: bold; margin-top: 5px; }
+        table {
             width: 100%;
             background: white;
             border-radius: 8px;
             overflow: hidden;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             border-collapse: collapse;
-        }}
-        th {{
-            background: #4CAF50;
-            color: white;
-            padding: 15px;
-            text-align: left;
-            font-weight: 600;
-        }}
-        td {{
-            padding: 12px 15px;
-            border-bottom: 1px solid #eee;
-        }}
-        tr:last-child td {{
-            border-bottom: none;
-        }}
-        tr:hover {{
-            background: #f9f9f9;
-        }}
-        .healthy {{
-            color: #4CAF50;
-            font-weight: bold;
-        }}
-        .unhealthy {{
-            color: #f44336;
-            font-weight: bold;
-        }}
-        .footer {{
+        }
+        th { background: #4CAF50; color: white; padding: 15px; text-align: left; font-weight: 600; }
+        td { padding: 12px 15px; border-bottom: 1px solid #eee; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background: #f9f9f9; }
+        .healthy { color: #4CAF50; font-weight: bold; }
+        .unhealthy { color: #f44336; font-weight: bold; }
+        .circuit-open { color: #f44336; font-size: 12px; }
+        .circuit-closed { color: #4CAF50; font-size: 12px; }
+        .circuit-half_open { color: #ff9800; font-size: 12px; }
+        .extra-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .extra-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .extra-card h3 { margin: 0 0 12px; color: #555; font-size: 15px; }
+        .kv-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; }
+        .kv-row .kv-label { color: #888; }
+        .kv-row .kv-val { font-weight: 600; color: #333; }
+        .footer {
             margin-top: 30px;
             padding: 20px;
             background: white;
@@ -1939,80 +1987,278 @@ curl http://localhost:8080/v1/chat/completions \\
             text-align: center;
             color: #777;
             font-size: 14px;
-        }}
-        .footer a {{
-            color: #4CAF50;
-            text-decoration: none;
-        }}
-        .footer a:hover {{
-            text-decoration: underline;
-        }}
+        }
+        .footer a { color: #4CAF50; text-decoration: none; }
+        .footer a:hover { text-decoration: underline; }
+        #last-updated { font-size: 12px; color: #999; margin-left: 10px; }
     </style>
 </head>
 <body>
-    <h1>🔄 Load Balancer Statistics</h1>
+    <h1>Load Balancer Statistics
+        <span id="conn-status" class="connection-status disconnected">
+            <span class="dot"></span>
+            <span id="conn-label">Connecting...</span>
+        </span>
+    </h1>
+    <span id="last-updated"></span>
 
     <h2>Total Statistics</h2>
     <div class="total-stats">
         <div class="stat-card">
             <div class="label">Total Requests</div>
-            <div class="value">{total_requests:,}</div>
+            <div class="value" id="stat-total-requests">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Request Rate</div>
+            <div class="value" id="stat-req-rate">--</div>
+            <div class="label" style="font-size:11px">req/min (last 60s)</div>
         </div>
         <div class="stat-card">
             <div class="label">Prompt Tokens</div>
-            <div class="value">{total_prompt_tokens:,}</div>
+            <div class="value" id="stat-prompt-tokens">--</div>
         </div>
         <div class="stat-card">
             <div class="label">Completion Tokens</div>
-            <div class="value">{total_completion_tokens:,}</div>
+            <div class="value" id="stat-completion-tokens">--</div>
         </div>
         <div class="stat-card">
             <div class="label">Total Tokens</div>
-            <div class="value">{total_prompt_tokens + total_completion_tokens:,}</div>
+            <div class="value" id="stat-total-tokens">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Healthy Backends</div>
+            <div class="value" id="stat-healthy-backends">--</div>
         </div>
     </div>
 
-    <h2>Backend Statistics</h2>
-    <table>
+    <h2>Backend Status</h2>
+    <table id="backends-table">
         <thead>
             <tr>
                 <th>Backend URL</th>
                 <th>Status</th>
-                <th>Requests</th>
-                <th>Prompt Tokens</th>
-                <th>Completion Tokens</th>
+                <th>Active</th>
+                <th>Total Requests</th>
                 <th>Total Tokens</th>
+                <th>Circuit</th>
             </tr>
         </thead>
-        <tbody>
-"""
-
-        for backend in backend_stats:
-            status_class = "healthy" if backend["healthy"] else "unhealthy"
-            status_text = "✓ Healthy" if backend["healthy"] else "✗ Unhealthy"
-            html += f"""
-            <tr>
-                <td><code>{backend["url"]}</code></td>
-                <td class="{status_class}">{status_text}</td>
-                <td>{backend["total_requests"]:,}</td>
-                <td>{backend["total_prompt_tokens"]:,}</td>
-                <td>{backend["total_completion_tokens"]:,}</td>
-                <td>{backend["total_tokens"]:,}</td>
-            </tr>
-"""
-
-        html += """
+        <tbody id="backends-tbody">
+            <tr><td colspan="6" style="text-align:center;color:#aaa">Waiting for data...</td></tr>
         </tbody>
     </table>
 
-    <div class="footer">
-        <p>View as JSON: <a href="?format=json">?format=json</a></p>
-        <p>llamacpp load-balancer proxy</p>
+    <div id="extra-section" class="extra-stats" style="display:none">
+        <div id="cache-card" class="extra-card" style="display:none">
+            <h3>Cache Statistics</h3>
+            <div id="cache-body"></div>
+        </div>
+        <div id="queue-card" class="extra-card" style="display:none">
+            <h3>Queue Statistics</h3>
+            <div id="queue-body"></div>
+        </div>
     </div>
+
+    <div class="footer">
+        <p>View as JSON: <a href="?format=json">?format=json</a> | Live stream: <a href="/stats/stream">/stats/stream</a></p>
+        <p>llamacpp load-balancer proxy &mdash; real-time via SSE</p>
+    </div>
+
+<script>
+(function () {
+    var rateWindow = [];
+    var RATE_WINDOW_MS = 60000;
+
+    function fmt(n) {
+        if (n === undefined || n === null) return '--';
+        return Number(n).toLocaleString();
+    }
+
+    function setConnected(ok) {
+        var el = document.getElementById('conn-status');
+        var lbl = document.getElementById('conn-label');
+        el.className = 'connection-status ' + (ok ? 'connected' : 'disconnected');
+        lbl.textContent = ok ? 'Live' : 'Disconnected';
+    }
+
+    function computeRate(totalRequests) {
+        var now = Date.now();
+        rateWindow.push({ts: now, v: totalRequests});
+        while (rateWindow.length > 1 && rateWindow[0].ts < now - RATE_WINDOW_MS) {
+            rateWindow.shift();
+        }
+        if (rateWindow.length < 2) return null;
+        var oldest = rateWindow[0];
+        var dtMin = (now - oldest.ts) / 60000;
+        if (dtMin < 0.01) return null;
+        return ((totalRequests - oldest.v) / dtMin).toFixed(1);
+    }
+
+    function kvRow(label, value) {
+        return '<div class="kv-row"><span class="kv-label">' + label +
+               '</span><span class="kv-val">' + value + '</span></div>';
+    }
+
+    function renderBackends(backends) {
+        if (!backends || backends.length === 0) return;
+        var rows = backends.map(function (b) {
+            var healthClass = b.healthy ? 'healthy' : 'unhealthy';
+            var healthTxt = b.healthy ? 'Healthy' : 'Unhealthy';
+            var circClass = 'circuit-' + (b.circuit_state || 'closed');
+            return '<tr>' +
+                '<td><code>' + b.url + '</code></td>' +
+                '<td class="' + healthClass + '">' + healthTxt + '</td>' +
+                '<td>' + fmt(b.active_requests) + '</td>' +
+                '<td>' + fmt(b.total_requests) + '</td>' +
+                '<td>' + fmt(b.total_tokens) + '</td>' +
+                '<td class="' + circClass + '">' + (b.circuit_state || 'closed') + '</td>' +
+                '</tr>';
+        }).join('');
+        document.getElementById('backends-tbody').innerHTML = rows;
+    }
+
+    function renderCache(cache) {
+        if (!cache) { document.getElementById('cache-card').style.display = 'none'; return; }
+        document.getElementById('cache-card').style.display = '';
+        var hits = cache.hits || 0;
+        var misses = cache.misses || 0;
+        var total = hits + misses;
+        var hitRate = total > 0 ? ((hits / total) * 100).toFixed(1) + '%' : 'N/A';
+        var html = kvRow('Hits', fmt(hits)) +
+                   kvRow('Misses', fmt(misses)) +
+                   kvRow('Hit Rate', hitRate);
+        if (cache.size !== undefined) html += kvRow('Cached Entries', fmt(cache.size));
+        if (cache.evictions !== undefined) html += kvRow('Evictions', fmt(cache.evictions));
+        document.getElementById('cache-body').innerHTML = html;
+    }
+
+    function renderQueue(queue) {
+        if (!queue) { document.getElementById('queue-card').style.display = 'none'; return; }
+        document.getElementById('queue-card').style.display = '';
+        var html = kvRow('Current Depth', fmt(queue.size)) +
+                   kvRow('Total Queued', fmt(queue.total_queued));
+        document.getElementById('queue-body').innerHTML = html;
+    }
+
+    function onData(data) {
+        document.getElementById('stat-total-requests').textContent = fmt(data.total_requests);
+        document.getElementById('stat-prompt-tokens').textContent = fmt(data.total_prompt_tokens);
+        document.getElementById('stat-completion-tokens').textContent = fmt(data.total_completion_tokens);
+        var totalTok = (data.total_prompt_tokens || 0) + (data.total_completion_tokens || 0);
+        document.getElementById('stat-total-tokens').textContent = fmt(totalTok);
+        document.getElementById('stat-healthy-backends').textContent =
+            (data.healthy_backends || 0) + ' / ' + (data.total_backends || 0);
+
+        var rate = computeRate(data.total_requests || 0);
+        document.getElementById('stat-req-rate').textContent = rate !== null ? rate : '0.0';
+
+        renderBackends(data.backends);
+        renderCache(data.cache);
+        renderQueue(data.queue);
+
+        var hasExtra = data.cache || data.queue;
+        document.getElementById('extra-section').style.display = hasExtra ? '' : 'none';
+
+        document.getElementById('last-updated').textContent =
+            'Last updated: ' + new Date().toLocaleTimeString();
+    }
+
+    function connect() {
+        setConnected(false);
+        var es = new EventSource('/stats/stream');
+
+        es.onopen = function () { setConnected(true); };
+
+        es.onmessage = function (evt) {
+            try {
+                var data = JSON.parse(evt.data);
+                onData(data);
+            } catch (e) { /* ignore parse errors */ }
+        };
+
+        es.onerror = function () {
+            setConnected(false);
+            es.close();
+            setTimeout(connect, 3000);
+        };
+    }
+
+    connect();
+})();
+</script>
 </body>
 </html>
 """
         return HTMLResponse(content=html)
+
+    @app.get("/stats/stream", tags=["Health & Stats"])
+    async def stats_stream(request: Request) -> StreamingResponse:
+        """Server-Sent Events stream for real-time stats.
+
+        Opens a persistent connection that pushes updated statistics every 2 seconds.
+        Clients should connect with the EventSource API.
+
+        ## Event Format
+
+        Each event is a JSON object:
+        ```
+        data: {"total_requests": 42, "healthy_backends": 2, ...}
+        ```
+
+        No authentication required.
+        """
+
+        async def generate():
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                async with state.get_lock():
+                    total_prompt_tokens = sum(b.total_prompt_tokens for b in state.backends)
+                    total_completion_tokens = sum(b.total_completion_tokens for b in state.backends)
+                    total_requests = sum(b.total_requests for b in state.backends)
+                    healthy_count = sum(1 for b in state.backends if b.healthy)
+
+                    payload: dict = {
+                        "total_requests": total_requests,
+                        "total_prompt_tokens": total_prompt_tokens,
+                        "total_completion_tokens": total_completion_tokens,
+                        "healthy_backends": healthy_count,
+                        "total_backends": len(state.backends),
+                        "backends": [
+                            {
+                                "url": b.url,
+                                "healthy": b.healthy,
+                                "active_requests": b.active_requests,
+                                "total_requests": b.total_requests,
+                                "total_tokens": b.total_prompt_tokens + b.total_completion_tokens,
+                                "circuit_state": b.circuit_breaker.state.value,
+                            }
+                            for b in state.backends
+                        ],
+                    }
+
+                if state.response_cache:
+                    payload["cache"] = state.response_cache.get_stats()
+
+                if state.request_queue:
+                    payload["queue"] = {
+                        "size": state.request_queue.size(),
+                        "total_queued": state.request_queue.total_queued,
+                    }
+
+                yield f"data: {json.dumps(payload)}\n\n"
+                await asyncio.sleep(2)
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return app
 
@@ -2032,6 +2278,12 @@ def run_lb_proxy(
     log_format: str = "json",
     max_request_size: int = 10 * 1024 * 1024,
     max_response_tokens: int = 32000,
+    warm_models: list[str] | None = None,
+    no_warm: bool = False,
+    allowed_ips: list[str] | None = None,
+    request_log_file: str | None = None,
+    request_log_failed_only: bool = False,
+    request_log_max: int = 1000,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
     import socket
@@ -2087,6 +2339,42 @@ def run_lb_proxy(
     state.max_request_size = max_request_size
     state.max_response_tokens = max_response_tokens
     state.rate_limiter = RateLimiter(rpm_limit=rate_limit_rpm, tph_limit=rate_limit_tph)
+
+    # Configure model warmer
+    if warm_models and not no_warm:
+        state.model_warmer = ModelWarmer(popular_models=warm_models, warm_on_startup=True)
+        print(
+            f"{_timestamp()} [lb-proxy] Model warming enabled for: {', '.join(warm_models)}",
+            flush=True,
+        )
+    elif no_warm:
+        print(f"{_timestamp()} [lb-proxy] Model warming disabled (--no-warm)", flush=True)
+
+    # Configure IP whitelist
+    if allowed_ips:
+        # Support comma-separated list in a single string entry
+        expanded: list[str] = []
+        for entry in allowed_ips:
+            expanded.extend(e.strip() for e in entry.split(",") if e.strip())
+        state.allowed_cidrs = expanded
+        print(
+            f"{_timestamp()} [lb-proxy] IP whitelist enabled: {', '.join(expanded)}", flush=True
+        )
+    else:
+        print(f"{_timestamp()} [lb-proxy] IP whitelist disabled - all IPs allowed", flush=True)
+
+    # Configure request logger
+    if request_log_file:
+        log_path = Path(request_log_file).expanduser().resolve()
+        state.request_logger = RequestLogger(
+            log_file=log_path,
+            max_records=request_log_max,
+            log_failed_only=request_log_failed_only,
+        )
+        mode = "failed-only" if request_log_failed_only else "all requests"
+        print(
+            f"{_timestamp()} [lb-proxy] Request logging enabled ({mode}): {log_path}", flush=True
+        )
 
     # Configure structured logging
     configure_logging(log_level=log_level, log_format=log_format)
