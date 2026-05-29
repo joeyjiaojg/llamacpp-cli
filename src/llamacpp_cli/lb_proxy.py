@@ -700,8 +700,9 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
 async def _rediscovery_loop(state: ProxyState) -> None:
     """Periodically rescan subnets for new backends.
 
-    Runs every state.rediscover_interval seconds. Only adds backends not already
-    known — never removes backends (health check handles that).
+    Runs every state.rediscover_interval seconds. Only probes host:port
+    pairs not already known. Uses a semaphore so large /24 subnets don't
+    exhaust connections.
     """
     import ipaddress
 
@@ -711,45 +712,51 @@ async def _rediscovery_loop(state: ProxyState) -> None:
         if not state.discover_subnets:
             continue
 
+        sem = asyncio.Semaphore(50)
+
+        async def _probe(host: str, port: int) -> None:
+            async with sem:
+                async with state.get_lock():
+                    known = any(
+                        b.host == host and b.port == port
+                        for b in state.backends
+                    )
+                if known:
+                    return
+
+                candidate = Backend(host=host, port=port)
+                healthy = await _check_backend_health(
+                    candidate, state.http_client, state.auth_key
+                )
+                if healthy:
+                    await _refresh_backend_models(
+                        candidate, state.http_client, state.auth_key
+                    )
+                    candidate.last_health_check = time.time()
+                    async with state.get_lock():
+                        if not any(
+                            b.host == candidate.host and b.port == candidate.port
+                            for b in state.backends
+                        ):
+                            state.backends.append(candidate)
+                            print(
+                                f"{_timestamp()} [lb-proxy] Rediscovered new backend:"
+                                f" {candidate.url}, models: {candidate.models}",
+                                flush=True,
+                            )
+
+        tasks = []
         for subnet in state.discover_subnets:
             try:
                 network = ipaddress.ip_network(subnet, strict=False)
             except ValueError:
                 continue
-
             for host in network.hosts():
                 for port in state.discover_ports:
-                    # Skip hosts we already know about
-                    async with state.get_lock():
-                        known = any(
-                            b.host == str(host) and b.port == port
-                            for b in state.backends
-                        )
-                    if known:
-                        continue
+                    tasks.append(_probe(str(host), port))
 
-                    # Probe the host:port
-                    candidate = Backend(host=str(host), port=port)
-                    healthy = await _check_backend_health(
-                        candidate, state.http_client, state.auth_key
-                    )
-                    if healthy:
-                        await _refresh_backend_models(
-                            candidate, state.http_client, state.auth_key
-                        )
-                        candidate.last_health_check = time.time()
-                        async with state.get_lock():
-                            # Double-check after lock (another task may have added it)
-                            if not any(
-                                b.host == candidate.host and b.port == candidate.port
-                                for b in state.backends
-                            ):
-                                state.backends.append(candidate)
-                                print(
-                                    f"{_timestamp()} [lb-proxy] Rediscovered new backend:"
-                                    f" {candidate.url}, models: {candidate.models}",
-                                    flush=True,
-                                )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _config_watch_loop(state: ProxyState, auth_key: str | None = None) -> None:
@@ -2623,7 +2630,15 @@ def run_lb_proxy(
             if not ports:
                 ports = [8000]
 
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            # Semaphore limits concurrent probes so no host is starved by
+            # httpx connection-pool exhaustion on large /24 subnets.
+            # 50 concurrent × 2s connect timeout = full /24 × 2 ports in ~20s.
+            sem = asyncio.Semaphore(50)
+
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=10.0),
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            ) as client:
                 print(
                     f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port(s) {ports}…",
                     flush=True,
@@ -2640,12 +2655,13 @@ def run_lb_proxy(
                 tasks = []
 
                 async def _try_host(host: str, port: int) -> Backend | None:
-                    backend = Backend(host=host, port=port)
-                    if await _check_backend_health(backend, client, auth_key, verbose=False):
-                        await _refresh_backend_models(backend, client, auth_key)
-                        backend.last_health_check = time.time()
-                        return backend
-                    return None
+                    async with sem:
+                        backend = Backend(host=host, port=port)
+                        if await _check_backend_health(backend, client, auth_key, verbose=False):
+                            await _refresh_backend_models(backend, client, auth_key)
+                            backend.last_health_check = time.time()
+                            return backend
+                        return None
 
                 for ip in network.hosts():
                     for p in ports:
