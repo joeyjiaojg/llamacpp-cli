@@ -10,6 +10,7 @@ services:
 
   llama-server:
     build: .
+    image: llamacpp-backend:latest   # fixed name shared by all project variants
     container_name: llamacpp-backend-${SOCKET_ID:-0}
     privileged: true          # numactl + disabling numa_balancing
     network_mode: host        # Exposes port on host IP; lb-proxy discovers it
