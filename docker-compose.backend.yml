@@ -1,48 +1,44 @@
 services:
   # Backend llama.cpp server - run this on each backend machine.
   #
-  # Topology:
-  #   - One container per machine (SOCKET_ID=0 for single-socket, or 0/1 for dual-socket)
-  #   - privileged: true is required so numactl can bind CPU + memory to a specific NUMA node
-  #   - network_mode: host lets the lb-proxy discover this via subnet scan on port 8000
+  # Runs llama-server DIRECTLY — no Python proxy wrapper.
+  # lb-proxy connects straight to llama-server on PORT (8000 or 8001).
   #
-  # Dual-socket machines: start TWO containers:
-  #   SOCKET_ID=0 PORT=8000 make start-backend MODEL_ARGS="--model ..."
-  #   SOCKET_ID=1 PORT=8001 make start-backend MODEL_ARGS="--model ..."
+  # Dual-socket: start two containers per machine:
+  #   SOCKET_ID=0 PORT=8000 make start-backend MODEL_ARGS="--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF"
+  #   SOCKET_ID=1 PORT=8001 make start-backend MODEL_ARGS="--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF"
 
   llama-server:
     build: .
     container_name: llamacpp-backend-${SOCKET_ID:-0}
-    privileged: true          # Required for numactl --cpunodebind/--membind AND disabling numa_balancing
-    network_mode: host        # Port is exposed directly on host; lb-proxy discovers it
-    pid: host                 # Lets numactl see real host NUMA topology
+    privileged: true          # numactl + disabling numa_balancing
+    network_mode: host        # Exposes port on host IP; lb-proxy discovers it
+    pid: host                 # numactl sees real host NUMA topology
     ulimits:
-      memlock: -1             # Unlimited mlock — allows the full model to be locked in RAM
+      memlock:
+        soft: -1              # Unlimited mlock — pins full model in RAM
+        hard: -1
       stack: 67108864
     volumes:
       - llamacpp-models:/data/llamacpp/.llamacpp/models
       - llamacpp-bin:/data/llamacpp/.llamacpp/bin
       - llamacpp-config:/data/llamacpp/.llamacpp
-      - /sys/devices/system/node:/sys/devices/system/node:ro  # NUMA topology
+      - /sys/devices/system/node:/sys/devices/system/node:ro
     environment:
       - LLAMACPP_HOME=/data/llamacpp/.llamacpp
       - LLAMACPP_AUTO_INSTALL=true
       - LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
       - SOCKET_ID=${SOCKET_ID:-0}
       - PORT=${PORT:-8000}
-      - SERVER_PORT=${SERVER_PORT:-8100}
       - MODEL_ARGS=${MODEL_ARGS:-}
     command:
       - bash
       - -c
       - >-
-        echo "[backend] Disabling NUMA auto-balancing (fights explicit cpunodebind)" &&
-        echo 0 > /proc/sys/kernel/numa_balancing || echo "[backend] Warning: could not disable numa_balancing (non-critical)" &&
-        echo "[backend] Starting on socket ${SOCKET_ID:-0}, port ${PORT:-8000}, server-port ${SERVER_PORT:-8100}" &&
-        exec llamacpp serve
-        --host 0.0.0.0
+        echo 0 > /proc/sys/kernel/numa_balancing 2>/dev/null || true &&
+        echo "[backend] socket=${SOCKET_ID:-0} port=${PORT:-8000}" &&
+        exec llamacpp llama-server
         --port ${PORT:-8000}
-        --server-port ${SERVER_PORT:-8100}
         --socket-id ${SOCKET_ID:-0}
         ${MODEL_ARGS}
     restart: unless-stopped

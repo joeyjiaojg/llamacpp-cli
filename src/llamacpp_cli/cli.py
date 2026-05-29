@@ -291,6 +291,79 @@ def list_cmd() -> None:
     list_downloaded_models()
 
 
+@cli.command("llama-server", context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
+@click.option("--model", "-m", required=True, help="Model name or HF path (e.g. jc-builds/Qwen3.5-9B-Q4_K_M-GGUF)")
+@click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
+@click.option("--port", "-p", default=8000, type=int, show_default=True, help="Port to bind.")
+@click.option("--socket-id", default=0, type=int, show_default=True, help="NUMA socket to bind to.")
+@click.option("--ctx-size", "-c", default=32768, type=int, show_default=True, help="Context window size.")
+@click.option("--parallel", default=2, type=int, show_default=True, help="Max parallel slots.")
+@click.option("--batch-size", "-b", default=512, type=int, show_default=True, help="Batch size.")
+@click.pass_context
+def llama_server_cmd(
+    ctx: click.Context,
+    model: str,
+    host: str,
+    port: int,
+    socket_id: int,
+    ctx_size: int,
+    parallel: int,
+    batch_size: int,
+) -> None:
+    """Run llama-server directly (no Python proxy wrapper).
+
+    Resolves the model name, applies NUMA binding, then execs llama-server.
+    Use this on backend machines so lb-proxy can connect directly.
+
+    Extra args after -- are forwarded to llama-server verbatim, e.g.:
+
+        llamacpp llama-server -m qwen3.5 --port 8000 -- --lv 0
+    """
+    import os
+    import subprocess
+
+    from .config import find_llama_binary
+    from .db import get_model
+    from .installer import ensure_llamacpp
+    from .model_manager import pull_model
+    from .server import build_server_cmd
+
+    if not ensure_llamacpp():
+        raise SystemExit(1)
+
+    # Resolve model name → file path (pull if needed)
+    model_info = get_model(model)
+    if not model_info:
+        click.echo(f"Model '{model}' not found locally, pulling…")
+        pull_model(model)
+        model_info = get_model(model)
+    if not model_info:
+        click.echo(f"Error: could not resolve model '{model}'", err=True)
+        raise SystemExit(1)
+
+    model_path = model_info["path"]
+
+    extra = list(ctx.args) if ctx.args else []
+
+    # Build all flags (handles NUMA wrapping, threads, kv-unified, etc.)
+    cmd = build_server_cmd(
+        model_path=model_path,
+        host=host,
+        port=port,
+        ctx_size=ctx_size,
+        extra_args=[
+            "--parallel", str(parallel),
+            "--batch-size", str(batch_size),
+            "--mlock",
+        ] + extra,
+        socket_id=socket_id,
+    )
+
+    click.echo(f"[backend] socket={socket_id} port={port} model={model_path}")
+    click.echo(f"[backend] cmd: {' '.join(cmd)}")
+    os.execvp(cmd[0], cmd)  # replace process — no Python wrapper overhead
+
+
 @cli.command()
 def ps() -> None:
     """Show running llama.cpp processes."""
