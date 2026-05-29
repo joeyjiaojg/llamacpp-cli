@@ -649,7 +649,7 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
                 now = time.time()
                 if (
                     backend.checking
-                    or now - backend.last_health_check < state.health_check_interval
+                    or now - backend.last_health_check <= state.health_check_interval
                 ):
                     continue
 
