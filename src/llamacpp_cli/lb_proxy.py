@@ -2268,7 +2268,7 @@ def run_lb_proxy(
     port: int = 8080,
     config_file: str | None = None,
     discover_subnet: str | None = None,
-    discover_port: int = 8000,
+    discover_port: str = "8000",  # comma-separated ports, e.g. "8000,8001"
     backends: list[str] | None = None,
     auth_key: str | None = None,
     api_key: str | None = None,
@@ -2426,14 +2426,17 @@ def run_lb_proxy(
 
         async def _discover_and_check(subnet: str) -> None:
             """Discover backends on a subnet in the background."""
-            # Create a new httpx client for this thread (httpx clients are not thread-safe)
+            # Parse comma-separated ports once
+            ports = [int(p.strip()) for p in str(discover_port).split(",") if p.strip().isdigit()]
+            if not ports:
+                ports = [8000]
+
             async with httpx.AsyncClient(timeout=5.0) as client:
                 print(
-                    f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port {discover_port}…",
+                    f"{_timestamp()} [lb-proxy] Scanning {subnet} for backends on port(s) {ports}…",
                     flush=True,
                 )
 
-                # Modified version of _discover_backends_on_subnet that uses local client
                 import ipaddress
 
                 try:
@@ -2444,8 +2447,8 @@ def run_lb_proxy(
 
                 tasks = []
 
-                async def _try_host(host: str) -> Backend | None:
-                    backend = Backend(host=host, port=discover_port)
+                async def _try_host(host: str, port: int) -> Backend | None:
+                    backend = Backend(host=host, port=port)
                     if await _check_backend_health(backend, client, auth_key, verbose=False):
                         await _refresh_backend_models(backend, client, auth_key)
                         backend.last_health_check = time.time()
@@ -2453,7 +2456,8 @@ def run_lb_proxy(
                     return None
 
                 for ip in network.hosts():
-                    tasks.append(_try_host(str(ip)))
+                    for p in ports:
+                        tasks.append(_try_host(str(ip), p))
 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 

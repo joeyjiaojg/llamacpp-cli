@@ -369,9 +369,9 @@ def show(model: str) -> None:
 )
 @click.option(
     "--discover-port",
-    default=8000,
-    type=int,
-    help="Port to scan for backends during discovery.",
+    default="8000",
+    type=str,
+    help="Port(s) to scan for backends. Comma-separated for multiple (e.g. 8000,8001 for dual-socket).",
 )
 @click.option(
     "--auth-key",
