@@ -1367,6 +1367,20 @@ curl http://localhost:8080/v1/chat/completions \\
     if state.allowed_cidrs:
         app.middleware("http")(create_ip_filter_middleware(state.allowed_cidrs))
 
+    # Suppress noisy client-disconnect errors from Starlette's StreamingResponse.
+    # When a client disconnects mid-stream, Starlette raises an ExceptionGroup
+    # containing RuntimeError/ConnectionResetError inside listen_for_disconnect().
+    # These are normal (client closed tab, timeout, etc.) and should not flood logs.
+    @app.exception_handler(Exception)
+    async def _suppress_client_disconnect(request: Request, exc: Exception) -> Response:
+        msg = str(exc)
+        if "Unexpected message received" in msg or "ConnectionResetError" in msg:
+            # Client disconnected - not an application error, log quietly and move on
+            print(f"{_timestamp()} [lb-proxy] Client disconnected: {type(exc).__name__}", flush=True)
+            from starlette.responses import Response as StarletteResponse
+            return StarletteResponse(status_code=499)  # 499 = client closed request
+        raise exc
+
     @app.post("/v1/chat/completions", tags=["OpenAI API"])
     async def chat_completions(request: Request) -> Response:
         """Chat completions endpoint (OpenAI-compatible).
