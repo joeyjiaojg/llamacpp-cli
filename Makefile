@@ -127,14 +127,14 @@ stop-backend-dual:
 
 build-proxy:
 	@echo "==> Building proxy image ..."
-	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build --no-cache
 
 ## No authentication
 start-proxy:
 	@echo "==> Starting lb-proxy  port=$(PROXY_PORT)  subnet=$(SUBNET)"
 	DISCOVER_SUBNET="$(SUBNET)" PROXY_PORT=$(PROXY_PORT) \
 		AUTH_KEY="$(AUTH_KEY)" API_KEY="$(API_KEY)" \
-		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d
+		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d --force-recreate
 	@echo ""
 	@echo "  Dashboard:  http://localhost:$(PROXY_PORT)/stats"
 	@echo "  Backends:   http://localhost:$(PROXY_PORT)/backends"
@@ -158,7 +158,7 @@ start-proxy-with-auth:
 	echo "==> Starting lb-proxy  port=$(PROXY_PORT)  subnet=$(SUBNET)"; \
 	DISCOVER_SUBNET="$(SUBNET)" PROXY_PORT=$(PROXY_PORT) \
 		AUTH_KEY="$$_KEY" API_KEY="$$_KEY" \
-		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d; \
+		$(DOCKER_COMPOSE) -f docker-compose.proxy.yml up -d --force-recreate; \
 	echo ""; \
 	echo "  Dashboard:  http://localhost:$(PROXY_PORT)/stats"; \
 	echo "  Backends:   http://localhost:$(PROXY_PORT)/backends"; \
