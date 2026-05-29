@@ -1,6 +1,6 @@
 .PHONY: help \
         build-backend start-backend stop-backend restart-backend logs-backend \
-        start-backend-dual stop-backend-dual \
+        start-backend-dual start-backend-single stop-backend-dual \
         build-proxy start-proxy start-proxy-with-auth stop-proxy restart-proxy logs-proxy \
         pull-model list-models status status-proxy \
         clean clean-volumes
@@ -50,7 +50,12 @@ help:
 	@echo ""
 	@echo "  Dual-socket shortcut (starts socket-0 on :8000 and socket-1 on :8001):"
 	@echo "  make start-backend-dual MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
+	@echo "  make start-backend-single MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
 	@echo "  make stop-backend-dual"
+	@echo ""
+	@echo "  Note:"
+	@echo "    start-backend-dual   → 2 slots per socket, 64K ctx each (4 concurrent requests)"
+	@echo "    start-backend-single → 1 slot per socket, 128K ctx each (2 concurrent requests)"
 	@echo ""
 	@echo "  PROXY COMMANDS  (run on ONE proxy machine)"
 	@echo "  ────────────────────────────────────────────"
@@ -120,6 +125,23 @@ stop-backend-dual:
 	@echo "==> Stopping both backend sockets ..."
 	$(DOCKER_COMPOSE) -f docker-compose.backend.yml -p llamacpp-backend-0 down 2>/dev/null || true
 	$(DOCKER_COMPOSE) -f docker-compose.backend.yml -p llamacpp-backend-1 down 2>/dev/null || true
+
+## Single-slot mode — one slot per socket with full 128K context
+start-backend-single:
+	@echo "==> Starting backend on BOTH sockets (1 slot each, 128K ctx) ..."
+	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
+	@echo "  Configuration: 1 slot/socket, 26 threads, 128K context"
+	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 MODEL_ARGS="$(MODEL_ARGS) --parallel 1 --threads 26 --ctx-size 131072" \
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
+		-p llamacpp-backend-0 up -d --force-recreate
+	SOCKET_ID=1 PORT=8001 SERVER_PORT=8101 MODEL_ARGS="$(MODEL_ARGS) --parallel 1 --threads 26 --ctx-size 131072" \
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
+		-p llamacpp-backend-1 up -d --force-recreate
+	@echo ""
+	@echo "  Socket 0:  curl http://localhost:8000/health"
+	@echo "  Socket 1:  curl http://localhost:8001/health"
+	@echo ""
+	@echo "  Total capacity: 2 concurrent requests, 128K context each"
 
 # ===========================================================================
 # PROXY  (run on ONE dedicated proxy machine)
