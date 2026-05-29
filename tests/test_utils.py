@@ -102,21 +102,137 @@ def test_get_cpu_server_config_fast_preset():
 
 
 def test_get_cpu_server_config_max_context_preset():
-    """Test max-context preset has minimal concurrency."""
-    config = get_cpu_server_config('max-context')
-    assert config['ctx_size'] == 32768  # Large context
-    assert config['parallel'] == 1  # Single request only
+    """Test max-context preset uses NUMA-aware parallel."""
+    with patch('llamacpp_cli.cpu_topology.detect_numa_topology') as mock_topology:
+        # Simulate dual-socket system with 2 NUMA nodes
+        mock_topology.return_value = {
+            "numa_nodes": [0, 1],
+            "num_sockets": 2,
+            "cpus_per_node": {0: [0, 1, 2, 3], 1: [4, 5, 6, 7]},
+            "has_numa": True,
+        }
+        config = get_cpu_server_config('max-context')
+        assert config['ctx_size'] == 32768  # Large context
+        assert config['parallel'] == 2  # Two slots (one per NUMA node)
 
 
-def test_get_cpu_server_config_default_is_code():
-    """Test that default preset is 'code'."""
+def test_get_cpu_server_config_default_is_max_context():
+    """Test that default preset is 'max-context'."""
     config_default = get_cpu_server_config()
-    config_code = get_cpu_server_config('code')
-    assert config_default == config_code
+    config_max = get_cpu_server_config('max-context')
+    assert config_default == config_max
 
 
 def test_get_cpu_server_config_invalid_preset():
-    """Test invalid preset falls back to code."""
+    """Test invalid preset falls back to max-context."""
     config = get_cpu_server_config('invalid_preset')
-    config_code = get_cpu_server_config('code')
-    assert config == config_code
+    config_max = get_cpu_server_config('max-context')
+    assert config == config_max
+
+
+def test_get_cpu_server_config_numa_aware_parallel_dual_socket():
+    """Test parallel slots auto-detect for dual-socket system."""
+    with patch('llamacpp_cli.cpu_topology.detect_numa_topology') as mock_topology:
+        # Simulate dual-socket system with 2 NUMA nodes
+        mock_topology.return_value = {
+            "numa_nodes": [0, 1],
+            "num_sockets": 2,
+            "cpus_per_node": {0: list(range(0, 16)), 1: list(range(16, 32))},
+            "has_numa": True,
+        }
+
+        # max-context preset should use num_slots directly
+        config = get_cpu_server_config('max-context')
+        assert config['parallel'] == 2
+
+        # code preset should be at least num_slots
+        config = get_cpu_server_config('code')
+        assert config['parallel'] >= 2
+
+        # chat preset should be at least num_slots
+        config = get_cpu_server_config('chat')
+        assert config['parallel'] >= 2
+
+        # fast preset should be at least num_slots
+        config = get_cpu_server_config('fast')
+        assert config['parallel'] >= 2
+
+
+def test_get_cpu_server_config_numa_aware_parallel_quad_socket():
+    """Test parallel slots auto-detect for quad-socket system."""
+    with patch('llamacpp_cli.cpu_topology.detect_numa_topology') as mock_topology:
+        # Simulate quad-socket system with 4 NUMA nodes
+        mock_topology.return_value = {
+            "numa_nodes": [0, 1, 2, 3],
+            "num_sockets": 4,
+            "cpus_per_node": {
+                0: list(range(0, 16)),
+                1: list(range(16, 32)),
+                2: list(range(32, 48)),
+                3: list(range(48, 64)),
+            },
+            "has_numa": True,
+        }
+
+        # max-context preset should use all 4 slots
+        config = get_cpu_server_config('max-context')
+        assert config['parallel'] == 4
+
+        # Other presets should respect caps but be at least num_slots
+        config = get_cpu_server_config('code')
+        assert config['parallel'] == 4  # min(4, max(4, cpu_count // 4))
+
+
+def test_get_cpu_server_config_numa_aware_parallel_single_socket():
+    """Test parallel slots auto-detect for single-socket system."""
+    with patch('llamacpp_cli.cpu_topology.detect_numa_topology') as mock_topology:
+        # Simulate single-socket system with 1 NUMA node
+        mock_topology.return_value = {
+            "numa_nodes": [0],
+            "num_sockets": 1,
+            "cpus_per_node": {0: list(range(0, 8))},
+            "has_numa": False,
+        }
+
+        # max-context preset should use 1 slot
+        config = get_cpu_server_config('max-context')
+        assert config['parallel'] == 1
+
+
+def test_get_cpu_server_config_numa_detection_failure():
+    """Test fallback when NUMA detection fails."""
+    with patch('llamacpp_cli.cpu_topology.detect_numa_topology', side_effect=Exception("Detection failed")):
+        # Should fallback to num_slots=1
+        config = get_cpu_server_config('max-context')
+        assert config['parallel'] == 1  # Fallback to single slot
+
+
+def test_get_cpu_server_config_preset_caps_respected():
+    """Test that preset caps are still respected with NUMA."""
+    with (
+        patch('llamacpp_cli.cpu_topology.detect_numa_topology') as mock_topology,
+        patch('llamacpp_cli.utils.get_cpu_count', return_value=128),
+    ):
+        # Simulate dual-socket system with many CPUs
+        mock_topology.return_value = {
+            "numa_nodes": [0, 1],
+            "num_sockets": 2,
+            "cpus_per_node": {0: list(range(0, 64)), 1: list(range(64, 128))},
+            "has_numa": True,
+        }
+
+        # code preset: min(4, max(2, 128 // 4)) = min(4, max(2, 32)) = 4
+        config = get_cpu_server_config('code')
+        assert config['parallel'] == 4
+
+        # chat preset: min(6, max(2, 128 // 3)) = min(6, max(2, 42)) = 6
+        config = get_cpu_server_config('chat')
+        assert config['parallel'] == 6
+
+        # fast preset: min(8, max(2, 128 // 2)) = min(8, max(2, 64)) = 8
+        config = get_cpu_server_config('fast')
+        assert config['parallel'] == 8
+
+        # max-context preset: num_slots = 2 (no cap)
+        config = get_cpu_server_config('max-context')
+        assert config['parallel'] == 2

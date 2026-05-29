@@ -66,8 +66,8 @@ def run(
 @click.option(
     "--preset",
     type=click.Choice(['code', 'chat', 'fast', 'max-context']),
-    default='code',
-    help="Optimization preset (code=16K ctx, chat=8K ctx, fast=4K ctx, max-context=32K ctx).",
+    default='max-context',
+    help="Optimization preset (max-context=32K ctx [default], code=16K, chat=8K, fast=4K).",
 )
 @click.option(
     "--ctx-size",
@@ -139,16 +139,19 @@ def serve(
     """Start the llama.cpp server with CPU-optimized presets.
 
     Presets optimize for different use cases:
-      - code: 16K context, 2-4 parallel requests (default, best for code tasks)
-      - chat: 8K context, 4-6 parallel requests (conversational workloads)
-      - fast: 4K context, 6-8 parallel requests (quick queries, max concurrency)
-      - max-context: 32K context, 1 parallel request (large repos, slower)
+      - max-context: 32K context, N parallel (N=NUMA nodes) [default]
+      - code: 16K context, 2-4 parallel requests (code tasks)
+      - chat: 8K context, 4-6 parallel requests (conversational)
+      - fast: 4K context, 6-8 parallel requests (quick queries)
+
+    The --parallel flag is automatically set to match available NUMA nodes/slots
+    (typically 2 on dual-socket systems), ensuring full NUMA parallelism.
 
     Extra args after -- are forwarded to llama-server, e.g.:
 
-        llamacpp serve --preset code --model qwen3.5
-        llamacpp serve --preset max-context -m qwen3:14b
-        llamacpp serve --ctx-size 32768 --parallel 1
+        llamacpp serve --model qwen3.5
+        llamacpp serve --preset code --model qwen3:14b
+        llamacpp serve --ctx-size 16384 --parallel 4
     """
     from .installer import ensure_llamacpp
     from .proxy import run_proxy

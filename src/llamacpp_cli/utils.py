@@ -61,45 +61,54 @@ def get_model_max_context(model_name: str) -> int:
         return 8192  # Conservative default
 
 
-def get_cpu_server_config(preset: str = 'code') -> dict:
+def get_cpu_server_config(preset: str = 'max-context') -> dict:
     """Get optimal CPU-only server configuration based on preset.
 
     Args:
-        preset: One of 'code', 'chat', 'fast', 'max-context'
+        preset: One of 'max-context', 'code', 'chat', 'fast'
 
     Returns:
         Dictionary with configuration parameters
     """
+    from .cpu_topology import detect_numa_topology
+
     cpu_count = get_cpu_count()
+
+    # Detect NUMA nodes for slot-based parallelism
+    try:
+        topology = detect_numa_topology()
+        num_slots = len(topology["numa_nodes"])
+    except Exception:
+        num_slots = 1  # Fallback to single slot
 
     presets = {
         'code': {
             'ctx_size': 16384,      # 16K - handle multiple files
-            'parallel': min(4, max(2, cpu_count // 4)),  # Conservative
+            'parallel': min(4, max(num_slots, cpu_count // 4)),  # At least num_slots
             'batch_size': 512,      # Moderate for CPU
             'mlock': True,          # Lock model in RAM
         },
         'chat': {
             'ctx_size': 8192,       # 8K - adequate for conversations
-            'parallel': min(6, max(2, cpu_count // 3)),  # Higher concurrency
+            'parallel': min(6, max(num_slots, cpu_count // 3)),  # At least num_slots
             'batch_size': 512,
             'mlock': True,
         },
         'fast': {
             'ctx_size': 4096,       # 4K - quick responses
-            'parallel': min(8, max(4, cpu_count // 2)),  # Maximum concurrency
+            'parallel': min(8, max(num_slots, cpu_count // 2)),  # At least num_slots
             'batch_size': 256,      # Smaller batches
             'mlock': True,
         },
         'max-context': {
-            'ctx_size': 32768,      # 32K - large codebases (slow!)
-            'parallel': 1,          # Single request at a time
+            'ctx_size': 32768,      # 32K - large codebases
+            'parallel': num_slots,  # One request per slot (NUMA-aware)
             'batch_size': 512,
             'mlock': True,
         }
     }
 
-    config = presets.get(preset, presets['code']).copy()
+    config = presets.get(preset, presets['max-context']).copy()
 
     # Add common settings
     config['threads'] = cpu_count
