@@ -8,8 +8,7 @@ RUN apt-get update && \
         git \
         build-essential \
         ca-certificates \
-        numactl \
-        numautils && \
+        numactl && \
     rm -rf /var/lib/apt/lists/*
 
 # Set working directory
