@@ -506,6 +506,15 @@ def lb_proxy(
         # Keep popular models warm to reduce cold-start latency
         llamacpp lb-proxy -b http://server:8000 --warm-models llama-3.3-70b-instruct,mistral-7b
 
+        # Allow only internal network IPs (IPv4 CIDR)
+        llamacpp lb-proxy -b http://server:8000 --allowed-ips 10.0.0.0/8,192.168.0.0/16
+
+        # Log all requests to a JSONL file for later replay/debugging
+        llamacpp lb-proxy -b http://server:8000 --request-log-file requests.jsonl
+
+        # Log only failed requests (4xx/5xx)
+        llamacpp lb-proxy -b http://server:8000 --request-log-file errors.jsonl --request-log-failed-only
+
     Config file format (JSON):
 
         {
@@ -528,6 +537,11 @@ def lb_proxy(
     if warm_models:
         warm_model_list = [m.strip() for m in warm_models.split(",") if m.strip()]
 
+    # Parse comma-separated allowed IPs
+    allowed_ip_list: list[str] | None = None
+    if allowed_ips:
+        allowed_ip_list = [ip.strip() for ip in allowed_ips.split(",") if ip.strip()]
+
     run_lb_proxy(
         host=host,
         port=port,
@@ -543,7 +557,74 @@ def lb_proxy(
         max_response_tokens=max_response_tokens,
         warm_models=warm_model_list,
         no_warm=no_warm,
+        allowed_ips=allowed_ip_list,
+        request_log_file=request_log_file,
+        request_log_failed_only=request_log_failed_only,
+        request_log_max=request_log_max,
     )
+
+
+@cli.command(name="lb-proxy-replay")
+@click.option(
+    "--log-file",
+    required=True,
+    help="Path to JSONL request log file created by lb-proxy --request-log-file.",
+)
+@click.option(
+    "--target",
+    required=True,
+    help="Base URL of the target server to replay requests against (e.g. http://localhost:8080).",
+)
+@click.option(
+    "--timeout",
+    default=30.0,
+    type=float,
+    help="Per-request HTTP timeout in seconds (default: 30).",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Print each request/response to stdout.",
+)
+def lb_proxy_replay(
+    log_file: str,
+    target: str,
+    timeout: float,
+    verbose: bool,
+) -> None:
+    """Replay requests from a request log file against a target server.
+
+    Useful for load testing, debugging, and reproducing issues.
+
+    The log file must be in JSONL format as created by:
+
+        llamacpp lb-proxy --request-log-file requests.jsonl
+
+    Examples:
+
+        # Replay all logged requests
+        llamacpp lb-proxy-replay --log-file requests.jsonl --target http://localhost:8080
+
+        # Verbose output
+        llamacpp lb-proxy-replay --log-file errors.jsonl --target http://localhost:8080 -v
+    """
+    import asyncio
+
+    from pathlib import Path
+
+    from .request_logger import replay_requests
+
+    log_path = Path(log_file).expanduser().resolve()
+    if not log_path.exists():
+        raise click.ClickException(f"Log file not found: {log_path}")
+
+    results = asyncio.run(replay_requests(log_path, target, timeout=timeout, verbose=verbose))
+
+    ok = sum(1 for r in results if r.get("ok"))
+    failed = len(results) - ok
+    click.echo(f"Replayed {len(results)} request(s): {ok} ok, {failed} failed.")
 
 
 @cli.command(name="slot-serve")
