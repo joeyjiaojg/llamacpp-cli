@@ -109,11 +109,11 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
         if state.batch_size is not None and '--batch-size' not in extra_cmd_args and '-b' not in extra_cmd_args:
             extra_cmd_args.extend(['--batch-size', str(state.batch_size)])
 
-        if state.mlock and '--mlock' not in extra_cmd_args and '--no-mmap' not in extra_cmd_args:
+        if state.mlock and '--mlock' not in extra_cmd_args:
             extra_cmd_args.append('--mlock')
 
-        if state.numa and '--numa' not in extra_cmd_args:
-            extra_cmd_args.extend(['--numa', 'numactl'])
+        # Don't add --numa here: build_server_cmd wraps with numactl --cpunodebind/--membind
+        # explicitly when multi-socket is detected, which is more effective than --numa numactl.
 
         cmd = build_server_cmd(
             model_path,

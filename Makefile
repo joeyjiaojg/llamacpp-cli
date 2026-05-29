@@ -79,7 +79,7 @@ help:
 
 build-backend:
 	@echo "==> Building backend image ..."
-	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build --no-cache
 
 ## Single socket (SOCKET_ID=0 by default)
 start-backend:
