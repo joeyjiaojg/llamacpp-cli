@@ -1055,7 +1055,12 @@ async def _forward_request(request: Request, backend: Backend, state: ProxyState
             try:
                 async for chunk in backend_resp.aiter_bytes():
                     response_chunks.append(chunk)
-                    yield chunk
+                    try:
+                        yield chunk
+                    except (ConnectionResetError, RuntimeError) as e:
+                        # Client disconnected - stop streaming gracefully
+                        print(f"{_timestamp()} [lb-proxy] Client disconnected during streaming: {e}", flush=True)
+                        break
             finally:
                 await backend_resp.aclose()
                 backend.active_requests -= 1
