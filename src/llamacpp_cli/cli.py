@@ -291,7 +291,7 @@ def list_cmd() -> None:
     list_downloaded_models()
 
 
-@cli.command("llama-server", context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
+@cli.command("llama-serve", context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
 @click.option("--model", "-m", required=True, help="Model name or HF path (e.g. jc-builds/Qwen3.5-9B-Q4_K_M-GGUF)")
 @click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
 @click.option("--port", "-p", default=8000, type=int, show_default=True, help="Port to bind.")
@@ -300,7 +300,7 @@ def list_cmd() -> None:
 @click.option("--parallel", default=2, type=int, show_default=True, help="Max parallel slots.")
 @click.option("--batch-size", "-b", default=512, type=int, show_default=True, help="Batch size.")
 @click.pass_context
-def llama_server_cmd(
+def llama_serve_cmd(
     ctx: click.Context,
     model: str,
     host: str,

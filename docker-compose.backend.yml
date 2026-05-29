@@ -37,7 +37,7 @@ services:
       - >-
         echo 0 > /proc/sys/kernel/numa_balancing 2>/dev/null || true &&
         echo "[backend] socket=${SOCKET_ID:-0} port=${PORT:-8000}" &&
-        exec llamacpp llama-server
+        exec llamacpp llama-serve
         --port ${PORT:-8000}
         --socket-id ${SOCKET_ID:-0}
         ${MODEL_ARGS}
