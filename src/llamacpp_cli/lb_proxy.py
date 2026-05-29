@@ -37,6 +37,46 @@ def _timestamp() -> str:
     return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
 
 
+def _is_disconnect_exc(exc: BaseException) -> bool:
+    """Return True if exc (or all exceptions inside an ExceptionGroup) are client-disconnect noise."""
+    if isinstance(exc, ExceptionGroup):
+        return all(_is_disconnect_exc(e) for e in exc.exceptions)
+    msg = str(exc)
+    return (
+        isinstance(exc, ConnectionResetError)
+        or "Unexpected message received" in msg
+        or "Connection reset by peer" in msg
+    )
+
+
+class _DisconnectSuppressor:
+    """Thin ASGI wrapper that swallows ExceptionGroup caused by client disconnects.
+
+    Starlette's StreamingResponse runs a concurrent 'listen_for_disconnect' task
+    inside an anyio TaskGroup.  When the client closes the connection mid-stream,
+    that task raises RuntimeError('Unexpected message received: http.request').
+    anyio wraps it into an ExceptionGroup which escapes all FastAPI exception
+    handlers and lands in uvicorn as 'ERROR: Exception in ASGI application'.
+
+    This wrapper intercepts it at the outermost ASGI layer before uvicorn sees it.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, send)
+        except BaseException as exc:
+            if _is_disconnect_exc(exc):
+                print(f"{_timestamp()} [lb-proxy] Client disconnected (streaming)", flush=True)
+                return
+            raise
+
+
 # Pydantic models for request/response documentation
 class ChatMessage(BaseModel):
     """A message in a chat conversation."""
@@ -1366,20 +1406,6 @@ curl http://localhost:8080/v1/chat/completions \\
     # IP whitelist middleware (applied after tracing so blocked requests are still logged)
     if state.allowed_cidrs:
         app.middleware("http")(create_ip_filter_middleware(state.allowed_cidrs))
-
-    # Suppress noisy client-disconnect errors from Starlette's StreamingResponse.
-    # When a client disconnects mid-stream, Starlette raises an ExceptionGroup
-    # containing RuntimeError/ConnectionResetError inside listen_for_disconnect().
-    # These are normal (client closed tab, timeout, etc.) and should not flood logs.
-    @app.exception_handler(Exception)
-    async def _suppress_client_disconnect(request: Request, exc: Exception) -> Response:
-        msg = str(exc)
-        if "Unexpected message received" in msg or "ConnectionResetError" in msg:
-            # Client disconnected - not an application error, log quietly and move on
-            print(f"{_timestamp()} [lb-proxy] Client disconnected: {type(exc).__name__}", flush=True)
-            from starlette.responses import Response as StarletteResponse
-            return StarletteResponse(status_code=499)  # 499 = client closed request
-        raise exc
 
     @app.post("/v1/chat/completions", tags=["OpenAI API"])
     async def chat_completions(request: Request) -> Response:
@@ -2733,7 +2759,7 @@ def run_lb_proxy(
     if discover_subnet:
         print(f"{_timestamp()} Discovery running in background for: {discover_subnet}", flush=True)
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    config = uvicorn.Config(_DisconnectSuppressor(app), host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
 
     # Start background discovery in a separate thread
