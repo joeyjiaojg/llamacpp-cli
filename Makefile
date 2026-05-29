@@ -2,7 +2,7 @@
         build-backend start-backend stop-backend restart-backend logs-backend \
         start-backend-dual start-backend-single stop-backend-dual \
         build-proxy start-proxy start-proxy-with-auth stop-proxy restart-proxy logs-proxy \
-        pull-model list-models status status-proxy \
+        pull-model pull-model-dual list-models status status-proxy \
         clean clean-volumes
 
 # ---------------------------------------------------------------------------
@@ -59,6 +59,11 @@ help:
 	@echo "  Note:"
 	@echo "    start-backend-dual   → 2 slots per socket, 64K ctx each (4 concurrent requests)"
 	@echo "    start-backend-single → 1 slot per socket, 128K ctx each (2 concurrent requests)"
+	@echo ""
+	@echo "  Model management:"
+	@echo "  make pull-model MODEL=<name>       Pull into single socket (SOCKET_ID=0 by default)"
+	@echo "  make pull-model-dual MODEL=<name>  Pull into BOTH sockets"
+	@echo "  make list-models"
 	@echo ""
 	@echo "  PROXY COMMANDS  (run on ONE proxy machine)"
 	@echo "  ────────────────────────────────────────────"
@@ -219,6 +224,18 @@ pull-model:
 	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
 		exec llama-server llamacpp pull $(MODEL)
+
+pull-model-dual:
+	@[ -n "$(MODEL)" ] || { echo "Usage: make pull-model-dual MODEL=<name>"; exit 1; }
+	@echo "==> Pulling $(MODEL) into socket 0 ..."
+	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 \
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
+		-p llamacpp-backend-0 exec llama-server llamacpp pull $(MODEL)
+	@echo "==> Pulling $(MODEL) into socket 1 ..."
+	SOCKET_ID=1 PORT=8001 SERVER_PORT=8101 \
+		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
+		-p llamacpp-backend-1 exec llama-server llamacpp pull $(MODEL)
+	@echo "==> Done. $(MODEL) available on both sockets."
 
 list-models:
 	SOCKET_ID=$(SOCKET_ID) PORT=$(PORT) \
