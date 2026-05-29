@@ -58,7 +58,7 @@ def run(
     )
 
 
-@cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
+@cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False, "ignore_unknown_options": True})
 @click.option(
     "--host",
     default="0.0.0.0",
@@ -286,8 +286,9 @@ def serve(
 
         click.echo(f"  Draft model: {draft_model}")
         extra_args = list(extra_args or [])
-        if "--model-draft" not in extra_args and "-md" not in extra_args:
-            extra_args.extend(["--model-draft", draft_path])
+        # Support both old (--model-draft) and new (--spec-draft-model) flag names
+        if not any(f in extra_args for f in ("--spec-draft-model", "--model-draft", "-md")):
+            extra_args.extend(["--spec-draft-model", draft_path])
 
     # Merge GPU args into extra_args (before user-supplied extra args)
     final_extra_args = gpu_cfg_args + extra_args if gpu_cfg_args else (extra_args or None)
