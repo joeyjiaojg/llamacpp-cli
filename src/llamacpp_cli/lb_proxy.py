@@ -270,7 +270,7 @@ class RequestQueue:
     """Queue for requests when no backends are available."""
 
     max_size: int = 100
-    timeout: float = 30.0
+    timeout: float = 600.0  # 10 minutes (increased from 30s to handle large prompts)
 
     _queue: deque = field(default_factory=deque)
     wait_times: list = field(default_factory=list)
