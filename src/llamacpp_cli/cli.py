@@ -59,14 +59,18 @@ def run(
 
 
 @cli.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
-@click.option("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0 for network access).")
+@click.option(
+    "--host",
+    default="0.0.0.0",
+    help="Host to bind (default: 0.0.0.0 for network access).",
+)
 @click.option("--port", "-p", default=8080, type=int, help="Port to bind.")
 @click.option("--server-port", default=8081, type=int, help="llama-server port (auto-managed).")
 @click.option("--model", "-m", default=None, help="Model to pre-load at startup.")
 @click.option(
     "--preset",
-    type=click.Choice(['code', 'chat', 'fast', 'max-context']),
-    default='max-context',
+    type=click.Choice(["code", "chat", "fast", "max-context"]),
+    default="max-context",
     help="Optimization preset (max-context=32K ctx [default], code=16K, chat=8K, fast=4K).",
 )
 @click.option(
@@ -155,7 +159,7 @@ def serve(
     """
     from .installer import ensure_llamacpp
     from .proxy import run_proxy
-    from .utils import get_cpu_server_config, get_cpu_count, detect_numa
+    from .utils import detect_numa, get_cpu_count, get_cpu_server_config
 
     if not ensure_llamacpp():
         return
@@ -165,21 +169,21 @@ def serve(
 
     # Override with explicit options
     if ctx_size is not None:
-        config['ctx_size'] = ctx_size
+        config["ctx_size"] = ctx_size
     if parallel is not None:
-        config['parallel'] = parallel
+        config["parallel"] = parallel
     if threads is not None:
-        config['threads'] = threads
+        config["threads"] = threads
     else:
-        config['threads'] = get_cpu_count()
+        config["threads"] = get_cpu_count()
     if batch_size is not None:
-        config['batch_size'] = batch_size
+        config["batch_size"] = batch_size
     if numa is not None:
-        config['numa'] = numa
-    elif 'numa' not in config:
-        config['numa'] = detect_numa()
+        config["numa"] = numa
+    elif "numa" not in config:
+        config["numa"] = detect_numa()
 
-    config['mlock'] = mlock
+    config["mlock"] = mlock
 
     # Display configuration
     click.echo(f"Starting llama.cpp server with preset '{preset}':")
@@ -191,7 +195,7 @@ def serve(
     click.echo(f"  Memory lock: {'enabled' if config['mlock'] else 'disabled'}")
     click.echo(f"  NUMA: {'enabled' if config['numa'] else 'disabled'}")
 
-    if preset == 'max-context':
+    if preset == "max-context":
         click.echo("⚠️  Warning: Large context (32K) on CPU will be slow!")
     if model:
         click.echo(f"  Pre-loading model: {model}")
@@ -201,12 +205,12 @@ def serve(
         port=port,
         server_port=server_port,
         default_model=model,
-        ctx_size=config['ctx_size'],
-        parallel=config['parallel'],
-        threads=config['threads'],
-        batch_size=config['batch_size'],
-        mlock=config['mlock'],
-        numa=config['numa'],
+        ctx_size=config["ctx_size"],
+        parallel=config["parallel"],
+        threads=config["threads"],
+        batch_size=config["batch_size"],
+        mlock=config["mlock"],
+        numa=config["numa"],
         socket_id=socket_id,
         extra_args=ctx.args or None,
         startup_timeout=startup_timeout,
@@ -292,7 +296,10 @@ def show(model: str) -> None:
 @click.option(
     "--discover-subnet",
     default=None,
-    help="Auto-discover backends on subnet(s) - supports comma-separated (e.g., 192.168.1.0/24,10.0.0.0/24).",
+    help=(
+        "Auto-discover backends on subnet(s) - supports comma-separated "
+        "(e.g., 192.168.1.0/24,10.0.0.0/24)."
+    ),
 )
 @click.option(
     "--discover-port",
@@ -308,7 +315,10 @@ def show(model: str) -> None:
 @click.option(
     "--api-key",
     default=None,
-    help="Optional API key for client requests. If set, clients must provide: Authorization: Bearer API_KEY",
+    help=(
+        "Optional API key for client requests. If set, clients must provide: "
+        "Authorization: Bearer API_KEY"
+    ),
 )
 @click.option(
     "--log-level",
@@ -386,6 +396,7 @@ def lb_proxy(
         }
     """
     import os
+
     from .lb_proxy import run_lb_proxy
 
     # Get log level from env var if not provided via CLI
@@ -475,3 +486,192 @@ def slot_serve(
         model=model,
         ctx_size=ctx_size,
     )
+
+
+@cli.group()
+def lb() -> None:
+    """Load balancer management commands."""
+
+
+@lb.command("backends")
+@click.option("--url", required=True, help="LB proxy URL (e.g., http://localhost:8080)")
+@click.option("--auth", help="API key for authentication")
+def backends_list(url: str, auth: str | None) -> None:
+    """List all backends and their status."""
+    import httpx
+    from rich.console import Console
+    from rich.table import Table
+
+    headers = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {auth}"
+
+    try:
+        resp = httpx.get(f"{url}/backends", headers=headers, timeout=10.0)
+        if resp.status_code == 200:
+            data = resp.json()
+
+            console = Console()
+            table = Table(title="Backends")
+
+            table.add_column("URL", style="cyan")
+            table.add_column("Status", style="green")
+            table.add_column("Models", style="yellow")
+            table.add_column("Active Reqs", style="magenta")
+            table.add_column("Load", style="blue")
+
+            for backend in data.get("backends", []):
+                status = "✓ Healthy" if backend.get("healthy", False) else "✗ Unhealthy"
+                models = ", ".join(backend.get("models", []))
+                active = str(backend.get("active_requests", 0))
+                load = backend.get("load_status", "unknown")
+
+                table.add_row(backend["url"], status, models, active, load)
+
+            console.print(table)
+        else:
+            click.echo(f"Error: HTTP {resp.status_code}", err=True)
+            raise SystemExit(1)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
+
+
+@lb.command("add")
+@click.option("--url", required=True, help="LB proxy URL")
+@click.option("--auth", help="API key")
+@click.option("--backend", required=True, help="Backend URL to add")
+@click.option("--weight", default=1.0, help="Backend weight (default: 1.0)")
+def backend_add(url: str, auth: str | None, backend: str, weight: float) -> None:
+    """Add a new backend to the load balancer."""
+    import httpx
+
+    headers = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {auth}"
+
+    payload = {"url": backend, "weight": weight}
+
+    try:
+        resp = httpx.post(f"{url}/backends", json=payload, headers=headers, timeout=10.0)
+        if resp.status_code in (200, 201):
+            click.echo(f"✓ Backend added: {backend} (weight: {weight})")
+        else:
+            click.echo(f"Error: HTTP {resp.status_code} - {resp.text}", err=True)
+            raise SystemExit(1)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
+
+
+@lb.command("remove")
+@click.option("--url", required=True, help="LB proxy URL")
+@click.option("--auth", help="API key")
+@click.option("--backend", required=True, help="Backend URL to remove")
+def backend_remove(url: str, auth: str | None, backend: str) -> None:
+    """Remove a backend from the load balancer."""
+    import httpx
+
+    headers = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {auth}"
+
+    try:
+        resp = httpx.delete(f"{url}/backends/{backend}", headers=headers, timeout=10.0)
+        if resp.status_code in (200, 204):
+            click.echo(f"✓ Backend removed: {backend}")
+        else:
+            click.echo(f"Error: HTTP {resp.status_code} - {resp.text}", err=True)
+            raise SystemExit(1)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
+
+
+@lb.command("stats")
+@click.option("--url", required=True, help="LB proxy URL")
+@click.option("--auth", help="API key")
+@click.option("--format", type=click.Choice(["table", "json"]), default="table")
+def stats(url: str, auth: str | None, format: str) -> None:
+    """Show load balancer statistics."""
+    import json
+
+    import httpx
+    from rich.console import Console
+    from rich.panel import Panel
+
+    headers = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {auth}"
+
+    try:
+        resp = httpx.get(f"{url}/stats?format=json", headers=headers, timeout=10.0)
+        if resp.status_code == 200:
+            data = resp.json()
+
+            if format == "json":
+                click.echo(json.dumps(data, indent=2))
+            else:
+                console = Console()
+
+                # Total stats
+                total = data.get("total", {})
+                stats_panel = Panel(
+                    f"Requests: {total.get('requests', 0):,}\n"
+                    f"Prompt Tokens: {total.get('prompt_tokens', 0):,}\n"
+                    f"Completion Tokens: {total.get('completion_tokens', 0):,}\n"
+                    f"Total Tokens: {total.get('total_tokens', 0):,}",
+                    title="Total Statistics",
+                    border_style="green",
+                )
+
+                console.print(stats_panel)
+
+                # Cache stats if available
+                if "cache" in data:
+                    cache = data["cache"]
+                    cache_panel = Panel(
+                        f"Hit Rate: {cache.get('hit_rate', 0):.1%}\n"
+                        f"Hits: {cache.get('cache_hits', 0):,}\n"
+                        f"Misses: {cache.get('cache_misses', 0):,}",
+                        title="Cache Statistics",
+                        border_style="blue",
+                    )
+                    console.print(cache_panel)
+        else:
+            click.echo(f"Error: HTTP {resp.status_code}", err=True)
+            raise SystemExit(1)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
+
+
+@lb.command("health")
+@click.option("--url", required=True, help="LB proxy URL")
+@click.option("--auth", help="API key")
+def health(url: str, auth: str | None) -> None:
+    """Check load balancer health."""
+    import httpx
+
+    headers = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {auth}"
+
+    try:
+        resp = httpx.get(f"{url}/health", headers=headers, timeout=5.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            click.echo(f"Status: {data.get('status', 'unknown')}")
+            backends = data.get("backends", {})
+            healthy = backends.get("healthy", 0)
+            total = backends.get("total", 0)
+            click.echo(f"Backends: {healthy}/{total} healthy")
+
+            if healthy < total:
+                raise SystemExit(1)
+        else:
+            click.echo(f"Error: HTTP {resp.status_code}", err=True)
+            raise SystemExit(1)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e

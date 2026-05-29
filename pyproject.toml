@@ -30,6 +30,7 @@ dependencies = [
     "uvicorn[standard]>=0.24",
     "httpx>=0.25",
     "structlog>=24.1.0",
+    "prometheus-client>=0.19",
 ]
 
 [project.optional-dependencies]

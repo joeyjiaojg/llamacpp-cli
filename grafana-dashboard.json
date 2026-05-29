@@ -1,0 +1,188 @@
+{
+  "dashboard": {
+    "title": "LB Proxy Metrics",
+    "uid": "lb-proxy",
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "10s",
+    "panels": [
+      {
+        "title": "Request Rate (req/s)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "rate(lb_proxy_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}} ({{backend}})"
+          }
+        ]
+      },
+      {
+        "title": "Error Rate",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "rate(lb_proxy_requests_total{status=~\"5..\"}[5m])",
+            "legendFormat": "5xx errors ({{backend}})"
+          },
+          {
+            "expr": "rate(lb_proxy_requests_total{status=~\"4..\"}[5m])",
+            "legendFormat": "4xx errors ({{backend}})"
+          }
+        ]
+      },
+      {
+        "title": "Request Latency Percentiles",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(lb_proxy_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50 ({{backend}})"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(lb_proxy_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95 ({{backend}})"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(lb_proxy_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p99 ({{backend}})"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Latency"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "title": "Active Requests",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "lb_proxy_active_requests",
+            "legendFormat": "{{backend}}"
+          }
+        ]
+      },
+      {
+        "title": "Token Rate (tokens/s)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(lb_proxy_tokens_total{type=\"prompt\"}[5m])",
+            "legendFormat": "Prompt ({{model}} @ {{backend}})"
+          },
+          {
+            "expr": "rate(lb_proxy_tokens_total{type=\"completion\"}[5m])",
+            "legendFormat": "Completion ({{model}} @ {{backend}})"
+          }
+        ]
+      },
+      {
+        "title": "Backend Health",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "lb_proxy_backend_healthy",
+            "legendFormat": "{{backend}}"
+          }
+        ],
+        "yaxes": [
+          {"min": 0, "max": 1, "format": "short"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "title": "Circuit Breaker State",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+        "targets": [
+          {
+            "expr": "lb_proxy_backend_circuit_state",
+            "legendFormat": "{{backend}}"
+          }
+        ],
+        "yaxes": [
+          {"min": 0, "max": 2, "format": "short"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "title": "Queue Depth",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+        "targets": [
+          {
+            "expr": "lb_proxy_queue_depth",
+            "legendFormat": "Queue depth"
+          }
+        ]
+      },
+      {
+        "title": "Queue Wait Time Percentiles",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(lb_proxy_queue_wait_seconds_bucket[5m]))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(lb_proxy_queue_wait_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(lb_proxy_queue_wait_seconds_bucket[5m]))",
+            "legendFormat": "p99"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Wait Time"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "title": "Rate Limit Hits",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+        "targets": [
+          {
+            "expr": "rate(lb_proxy_rate_limit_hits_total[5m])",
+            "legendFormat": "{{key_type}}"
+          }
+        ]
+      },
+      {
+        "title": "Backend Utilization (%)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+        "targets": [
+          {
+            "expr": "(lb_proxy_active_requests / on(backend) (lb_proxy_backend_healthy * 100)) * 100",
+            "legendFormat": "{{backend}}"
+          }
+        ],
+        "yaxes": [
+          {"min": 0, "max": 100, "format": "percent"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "title": "Consecutive Failures",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+        "targets": [
+          {
+            "expr": "lb_proxy_backend_consecutive_failures",
+            "legendFormat": "{{backend}}"
+          }
+        ]
+      }
+    ]
+  }
+}

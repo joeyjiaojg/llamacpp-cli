@@ -5,7 +5,7 @@ The `llamacpp lb-proxy` command provides a smart load balancer for distributing 
 ## Features
 
 - **Model-aware routing**: Routes requests to backends that have the requested model
-- **Least-connections load balancing**: Distributes load evenly across available backends
+- **Weighted least-connections load balancing**: Distributes load proportionally based on backend capacity
 - **Auto health checks**: Continuously monitors backend health and removes unhealthy instances
 - **Auto-discovery**: 
   - Config file watching with hot-reload
@@ -23,6 +23,19 @@ llamacpp lb-proxy \
   --backend http://machine3:8000
 ```
 
+Or with weights (for backends with different capacities):
+
+```bash
+llamacpp lb-proxy \
+  --backend http://machine1:8000:1.0 \
+  --backend http://machine2:8000:2.0 \
+  --backend http://machine3:8000:0.5
+```
+
+The weight indicates relative capacity:
+- `2.0` = can handle 2x the load of a `1.0` backend
+- `0.5` = can handle half the load of a `1.0` backend
+
 ### 2. Auto-Discovery on Subnet
 
 Scan your local network for llama-server instances:
@@ -38,12 +51,16 @@ Create `~/.llamacpp/lb_backends.json`:
 ```json
 {
   "backends": [
-    {"host": "192.168.1.10", "port": 8000},
-    {"host": "192.168.1.11", "port": 8000},
-    {"host": "192.168.1.12", "port": 8000}
+    {"host": "192.168.1.10", "port": 8000, "weight": 1.0},
+    {"host": "192.168.1.11", "port": 8000, "weight": 2.0},
+    {"host": "192.168.1.12", "port": 8000, "weight": 1.5}
   ]
 }
 ```
+
+Weight is optional (defaults to 1.0). Use weights to represent different backend capacities:
+- A backend with weight `2.0` will receive roughly 2x the requests of a `1.0` backend
+- A backend with weight `0.5` will receive roughly half the requests
 
 Start the proxy:
 
@@ -59,8 +76,10 @@ The proxy watches the config file and auto-reloads when you add/remove backends.
 
 1. **Model extraction**: Extract `model` field from incoming `/v1/chat/completions` request
 2. **Model filtering**: Filter to backends that have the requested model (via `/v1/models` query)
-3. **Least-connections**: Among matching backends, pick the one with fewest active requests
-4. **Fallback**: If model not found on any backend, use least-connections across all healthy backends
+3. **Weighted least-connections**: Among matching backends, calculate score = `active_requests / weight` and pick the backend with the lowest score
+4. **Fallback**: If model not found on any backend, use weighted least-connections across all healthy backends
+
+The weighted selection ensures backends with higher weights (more capacity) receive proportionally more load.
 
 ### Health Checks
 
@@ -101,7 +120,9 @@ Output:
       "url": "http://192.168.1.10:8000",
       "healthy": true,
       "models": ["qwen3.5:1.5b-q4_k_m", "gemma3:2b-q4_k_m"],
-      "active_requests": 2
+      "active_requests": 2,
+      "load_status": "busy",
+      "weight": 1.0
     },
     {
       "url": "http://192.168.1.11:8000",
