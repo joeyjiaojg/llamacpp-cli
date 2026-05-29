@@ -1,6 +1,20 @@
 # syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
+# Use China mirror for apt when CHINA=1 (e.g. make build-backend CHINA=1)
+ARG CHINA=0
+RUN if [ "${CHINA}" = "1" ]; then \
+        sed -i \
+            's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; \
+             s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
+            /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+        sed -i \
+            's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; \
+             s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
+            /etc/apt/sources.list 2>/dev/null || true; \
+        echo "==> Using Tsinghua mirror for apt"; \
+    fi
+
 # System dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -41,12 +55,17 @@ WORKDIR /app
 
 # ---------------------------------------------------------------------------
 # Install Python dependencies — layer cached until pyproject.toml changes.
-# Copy only pyproject.toml (no src/) so code edits don't bust this layer.
+# Use China pip mirror when CHINA=1.
 # ---------------------------------------------------------------------------
 COPY pyproject.toml ./
-# Dummy src/ structure so pip install -e . resolves the package metadata
 RUN mkdir -p src/llamacpp_cli && touch src/llamacpp_cli/__init__.py && \
-    pip install --no-cache-dir -e .
+    if [ "${CHINA}" = "1" ]; then \
+        pip install --no-cache-dir -e . \
+            -i https://pypi.tuna.tsinghua.edu.cn/simple \
+            --trusted-host pypi.tuna.tsinghua.edu.cn; \
+    else \
+        pip install --no-cache-dir -e .; \
+    fi
 
 # ---------------------------------------------------------------------------
 # Copy actual source — only layers below here rebuild on code changes.

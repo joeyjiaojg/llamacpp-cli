@@ -23,6 +23,7 @@ SUBNET       ?= 192.168.1.0/24
 PROXY_PORT   ?= 8080
 AUTH_KEY     ?=
 API_KEY      ?=
+CHINA        ?= 0
 
 # ---------------------------------------------------------------------------
 # Help
@@ -84,6 +85,7 @@ help:
 	@echo "  AUTH_KEY     Backend<->proxy authentication key"
 	@echo "  API_KEY      Client->proxy API key"
 	@echo "  LLAMACPP_API_KEY  Pre-set API key used by start-proxy-with-auth"
+	@echo "  CHINA        Set to 1 to use Tsinghua mirrors for apt/pip (default: 0)"
 	@echo ""
 
 # ===========================================================================
@@ -92,7 +94,8 @@ help:
 
 build-backend:
 	@echo "==> Building backend image ..."
-	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build \
+		--build-arg CHINA=$(CHINA)
 	@echo "==> Ensuring shared volumes exist ..."
 	docker volume create llamacpp-models 2>/dev/null || true
 	docker volume create llamacpp-bin 2>/dev/null || true
@@ -167,7 +170,8 @@ start-backend-single:
 
 build-proxy:
 	@echo "==> Building proxy image ..."
-	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.proxy.yml build \
+		--build-arg CHINA=$(CHINA)
 
 ## No authentication
 start-proxy:
