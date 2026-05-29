@@ -30,6 +30,7 @@ services:
       - LLAMACPP_RELEASE_URL=https://github.com/ggml-org/llama.cpp/releases/download/b9371/llama-b9371-bin-ubuntu-x64.tar.gz
       - SOCKET_ID=${SOCKET_ID:-0}
       - PORT=${PORT:-8000}
+      - SERVER_PORT=${SERVER_PORT:-8100}
       - MODEL_ARGS=${MODEL_ARGS:-}
     command:
       - bash
@@ -37,8 +38,10 @@ services:
       - >-
         echo 0 > /proc/sys/kernel/numa_balancing 2>/dev/null || true &&
         echo "[backend] socket=${SOCKET_ID:-0} port=${PORT:-8000}" &&
-        exec llamacpp llama-serve
+        exec llamacpp serve
+        --host 0.0.0.0
         --port ${PORT:-8000}
+        --server-port ${SERVER_PORT:-8100}
         --socket-id ${SOCKET_ID:-0}
         ${MODEL_ARGS}
     restart: unless-stopped
