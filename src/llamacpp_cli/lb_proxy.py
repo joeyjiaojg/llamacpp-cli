@@ -588,6 +588,8 @@ async def _check_backend_health(
                                 flush=True,
                             )
                         return False
+                # Update model list from the response we already have (avoids a second call)
+                backend.models = [m.get("id", "") for m in data["data"] if m.get("id")]
                 return True
             else:
                 if verbose:
@@ -677,7 +679,6 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
 
                     if should_mark_healthy:
                         backend.healthy = True
-                        await _refresh_backend_models(backend, state.http_client, auth_key)
                         print(
                             f"{_timestamp()} [lb-proxy] Backend {backend.url} became healthy "
                             f"(after {backend.consecutive_successes} consecutive successes), models: {backend.models}",
@@ -690,9 +691,7 @@ async def _health_check_loop(state: ProxyState, auth_key: str | None = None) -> 
                             f"(after {backend.consecutive_failures} consecutive failures)",
                             flush=True,
                         )
-                    elif backend.healthy:
-                        # Refresh models silently if still healthy
-                        await _refresh_backend_models(backend, state.http_client, auth_key)
+                    # models already updated inside _check_backend_health()
                 finally:
                     backend.checking = False
 
@@ -729,9 +728,7 @@ async def _rediscovery_loop(state: ProxyState) -> None:
                     candidate, state.http_client, state.auth_key
                 )
                 if healthy:
-                    await _refresh_backend_models(
-                        candidate, state.http_client, state.auth_key
-                    )
+                    # models already populated by _check_backend_health()
                     candidate.last_health_check = time.time()
                     async with state.get_lock():
                         if not any(
@@ -820,8 +817,7 @@ async def _load_backends_from_config(state: ProxyState, auth_key: str | None = N
                         healthy = await _check_backend_health(new_backend, state.http_client, auth_key)
                         new_backend.healthy = healthy
                         new_backend.last_health_check = time.time()
-                        if healthy:
-                            await _refresh_backend_models(new_backend, state.http_client, auth_key)
+                        # models already populated by _check_backend_health()
 
             # Remove deleted backends
             removed = existing - new
@@ -850,7 +846,7 @@ async def _discover_backends_on_subnet(state: ProxyState, subnet: str, port: int
     async def _try_host(host: str) -> Backend | None:
         backend = Backend(host=host, port=port)
         if await _check_backend_health(backend, state.http_client, state.auth_key):
-            await _refresh_backend_models(backend, state.http_client, state.auth_key)
+            # models already populated by _check_backend_health()
             backend.last_health_check = time.time()
             return backend
         return None
@@ -2663,7 +2659,7 @@ def run_lb_proxy(
                     async with sem:
                         backend = Backend(host=host, port=port)
                         if await _check_backend_health(backend, client, auth_key, verbose=False):
-                            await _refresh_backend_models(backend, client, auth_key)
+                            # models already populated by _check_backend_health()
                             backend.last_health_check = time.time()
                             return backend
                         return None
@@ -2704,7 +2700,7 @@ def run_lb_proxy(
             backend.healthy = healthy
             backend.last_health_check = time.time()
             if healthy:
-                await _refresh_backend_models(backend, state.http_client, auth_key)
+                # models already populated by _check_backend_health()
                 print(
                     f"{_timestamp()} [lb-proxy] Backend {backend.url} ready, models: {backend.models}",
                     flush=True,
