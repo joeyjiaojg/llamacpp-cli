@@ -13,9 +13,12 @@ services:
   llama-server:
     build: .
     container_name: llamacpp-backend-${SOCKET_ID:-0}
-    privileged: true          # Required for numactl --cpunodebind/--membind
+    privileged: true          # Required for numactl --cpunodebind/--membind AND disabling numa_balancing
     network_mode: host        # Port is exposed directly on host; lb-proxy discovers it
-    pid: host                 # Lets numactl see host NUMA topology
+    pid: host                 # Lets numactl see real host NUMA topology
+    ulimits:
+      memlock: -1             # Unlimited mlock — allows the full model to be locked in RAM
+      stack: 67108864
     volumes:
       - llamacpp-models:/data/llamacpp/.llamacpp/models
       - llamacpp-bin:/data/llamacpp/.llamacpp/bin
@@ -33,6 +36,8 @@ services:
       - bash
       - -c
       - >-
+        echo "[backend] Disabling NUMA auto-balancing (fights explicit cpunodebind)" &&
+        echo 0 > /proc/sys/kernel/numa_balancing || echo "[backend] Warning: could not disable numa_balancing (non-critical)" &&
         echo "[backend] Starting on socket ${SOCKET_ID:-0}, port ${PORT:-8000}, server-port ${SERVER_PORT:-8100}" &&
         exec llamacpp serve
         --host 0.0.0.0
