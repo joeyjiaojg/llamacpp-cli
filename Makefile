@@ -93,6 +93,10 @@ help:
 build-backend:
 	@echo "==> Building backend image ..."
 	$(DOCKER_COMPOSE) -f docker-compose.backend.yml build
+	@echo "==> Ensuring shared volumes exist ..."
+	docker volume create llamacpp-models 2>/dev/null || true
+	docker volume create llamacpp-bin 2>/dev/null || true
+	docker volume create llamacpp-config 2>/dev/null || true
 
 ## Single socket (SOCKET_ID=0 by default)
 start-backend:
@@ -119,6 +123,9 @@ logs-backend:
 start-backend-dual:
 	@echo "==> Starting backend on BOTH sockets (0->:8000, 1->:8001) ..."
 	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
+	@docker volume create llamacpp-models 2>/dev/null || true
+	@docker volume create llamacpp-bin 2>/dev/null || true
+	@docker volume create llamacpp-config 2>/dev/null || true
 	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 MODEL_ARGS="$(MODEL_ARGS)" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
 		-p llamacpp-backend-0 up -d --force-recreate
@@ -138,6 +145,9 @@ stop-backend-dual:
 start-backend-single:
 	@echo "==> Starting backend on BOTH sockets (1 slot each, 128K ctx) ..."
 	@[ -n "$(MODEL_ARGS)" ] || echo "  Tip: add MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
+	@docker volume create llamacpp-models 2>/dev/null || true
+	@docker volume create llamacpp-bin 2>/dev/null || true
+	@docker volume create llamacpp-config 2>/dev/null || true
 	@echo "  Configuration: 1 slot/socket, 26 threads, 128K context"
 	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 MODEL_ARGS="$(MODEL_ARGS) --parallel 1 --threads 26 --ctx-size 131072" \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
@@ -227,14 +237,10 @@ pull-model:
 
 pull-model-dual:
 	@[ -n "$(MODEL)" ] || { echo "Usage: make pull-model-dual MODEL=<name>"; exit 1; }
-	@echo "==> Pulling $(MODEL) into socket 0 ..."
+	@echo "==> Pulling $(MODEL) (shared volume — only needs one pull) ..."
 	SOCKET_ID=0 PORT=8000 SERVER_PORT=8100 \
 		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
 		-p llamacpp-backend-0 exec llama-server llamacpp pull $(MODEL)
-	@echo "==> Pulling $(MODEL) into socket 1 ..."
-	SOCKET_ID=1 PORT=8001 SERVER_PORT=8101 \
-		$(DOCKER_COMPOSE) -f docker-compose.backend.yml \
-		-p llamacpp-backend-1 exec llama-server llamacpp pull $(MODEL)
 	@echo "==> Done. $(MODEL) available on both sockets."
 
 list-models:

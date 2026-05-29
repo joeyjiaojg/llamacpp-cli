@@ -48,8 +48,11 @@ services:
 
 volumes:
   llamacpp-models:
-    driver: local
+    external: true        # shared across both sockets — create once with: docker volume create llamacpp-models
+    name: llamacpp-models
   llamacpp-bin:
-    driver: local
+    external: true
+    name: llamacpp-bin
   llamacpp-config:
-    driver: local
+    external: true
+    name: llamacpp-config
