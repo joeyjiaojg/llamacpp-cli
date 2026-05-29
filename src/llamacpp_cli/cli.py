@@ -107,6 +107,12 @@ def run(
     help="Enable NUMA optimization for multi-socket systems (default: auto-detect).",
 )
 @click.option(
+    "--socket-id",
+    default=0,
+    type=int,
+    help="NUMA socket/node to bind to on multi-socket systems (default: 0).",
+)
+@click.option(
     "--startup-timeout",
     default=120.0,
     type=float,
@@ -127,6 +133,7 @@ def serve(
     batch_size: int | None,
     mlock: bool,
     numa: bool | None,
+    socket_id: int,
     startup_timeout: float,
 ) -> None:
     """Start the llama.cpp server with CPU-optimized presets.
@@ -197,6 +204,7 @@ def serve(
         batch_size=config['batch_size'],
         mlock=config['mlock'],
         numa=config['numa'],
+        socket_id=socket_id,
         extra_args=ctx.args or None,
         startup_timeout=startup_timeout,
     )
@@ -394,4 +402,73 @@ def lb_proxy(
         log_format=log_format,
         max_request_size=max_request_size,
         max_response_tokens=max_response_tokens,
+    )
+
+
+@cli.command(name="slot-serve")
+@click.option("--host", default="127.0.0.1", help="Host to bind.")
+@click.option("--port", "-p", default=7000, type=int, help="Management API port.")
+@click.option(
+    "--base-port",
+    default=8000,
+    type=int,
+    help="Base port for slot servers (increments for each slot).",
+)
+@click.option("--model", "-m", default=None, help="Model to pre-load on startup.")
+@click.option(
+    "--ctx-size",
+    "-c",
+    default=None,
+    type=int,
+    help="Context window size.",
+)
+def slot_serve(
+    host: str,
+    port: int,
+    base_port: int,
+    model: str | None,
+    ctx_size: int | None,
+) -> None:
+    """Start slot-based server with NUMA awareness.
+
+    Automatically creates one inference slot per CPU socket/NUMA node.
+    Each slot runs an independent llama-server process bound to its NUMA node.
+
+    Features:
+    - Automatic NUMA topology detection
+    - Model affinity routing (Tier 1: loaded, Tier 2: idle, Tier 3: any)
+    - Dynamic model loading/unloading
+    - Management API for slot control
+
+    Examples:
+
+        # Start with automatic slot detection
+        llamacpp slot-serve
+
+        # Pre-load a model
+        llamacpp slot-serve --model qwen3.5
+
+        # Custom ports
+        llamacpp slot-serve --port 7000 --base-port 8000
+
+    Management API:
+        GET  /slots - List all slots
+        POST /load - Load model on best slot
+        POST /unload/<slot_id> - Unload specific slot
+
+    Inference API:
+        POST /v1/chat/completions - OpenAI-compatible chat endpoint
+    """
+    from .installer import ensure_llamacpp
+    from .slot_serve import run_slot_serve
+
+    if not ensure_llamacpp():
+        return
+
+    run_slot_serve(
+        host=host,
+        port=port,
+        base_port=base_port,
+        model=model,
+        ctx_size=ctx_size,
     )

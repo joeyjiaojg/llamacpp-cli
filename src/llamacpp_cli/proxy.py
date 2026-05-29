@@ -41,6 +41,7 @@ class ProxyState:
     batch_size: int | None = None
     mlock: bool = True
     numa: bool = False
+    socket_id: int = 0
     extra_args: list[str] = field(default_factory=list)
     startup_timeout: float = 120.0
     # Persistent HTTP client — must outlive individual StreamingResponse bodies.
@@ -120,6 +121,7 @@ async def _ensure_model_loaded(model: str, state: ProxyState) -> None:
             port=state.server_port,
             ctx_size=state.ctx_size,
             extra_args=extra_cmd_args,
+            socket_id=state.socket_id,
         )
         print(f"[proxy] Starting llama-server on port {state.server_port} with {canonical!r}")
         state.server_proc = subprocess.Popen(cmd)
@@ -251,10 +253,15 @@ def run_proxy(
     batch_size: int | None = None,
     mlock: bool = True,
     numa: bool = False,
+    socket_id: int = 0,
     extra_args: list[str] | None = None,
     startup_timeout: float = 120.0,
 ) -> None:
-    """Start the proxy in the foreground (blocking). Ctrl+C shuts everything down."""
+    """Start the proxy in the foreground (blocking). Ctrl+C shuts everything down.
+
+    Args:
+        socket_id: NUMA socket/node to bind the backend llama-server to (default: 0)
+    """
     import socket
 
     import uvicorn
@@ -291,6 +298,7 @@ def run_proxy(
         batch_size=batch_size,
         mlock=mlock,
         numa=numa,
+        socket_id=socket_id,
         extra_args=extra_args or [],
         startup_timeout=startup_timeout,
     )
