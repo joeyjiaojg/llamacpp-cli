@@ -123,6 +123,17 @@ def run(
     show_default=True,
     help="Startup timeout in seconds.",
 )
+@click.option(
+    "--gpu/--no-gpu",
+    default=None,
+    help="Enable GPU acceleration (auto-detect NVIDIA/AMD). Default: auto.",
+)
+@click.option(
+    "--gpu-layers",
+    default=None,
+    type=int,
+    help="Number of model layers to offload to GPU (overrides auto-detect).",
+)
 @click.pass_context
 def serve(
     ctx: click.Context,
@@ -139,6 +150,8 @@ def serve(
     numa: bool | None,
     socket_id: int,
     startup_timeout: float,
+    gpu: bool | None,
+    gpu_layers: int | None,
 ) -> None:
     """Start the llama.cpp server with CPU-optimized presets.
 
@@ -151,12 +164,24 @@ def serve(
     The --parallel flag is automatically set to match available NUMA nodes/slots
     (typically 2 on dual-socket systems), ensuring full NUMA parallelism.
 
+    GPU acceleration is auto-detected when --gpu is passed; use --no-gpu to
+    force CPU-only mode.
+
     Extra args after -- are forwarded to llama-server, e.g.:
 
         llamacpp serve --model qwen3.5
         llamacpp serve --preset code --model qwen3:14b
         llamacpp serve --ctx-size 16384 --parallel 4
+        llamacpp serve --gpu --model qwen3.5
+        llamacpp serve --gpu-layers 40 --model qwen3.5
+        llamacpp serve --no-gpu --model qwen3.5
     """
+    from .gpu_detect import (
+        auto_configure_gpu,
+        detect_all_gpus,
+        format_gpu_info,
+        get_gpu_server_args,
+    )
     from .installer import ensure_llamacpp
     from .proxy import run_proxy
     from .utils import detect_numa, get_cpu_count, get_cpu_server_config
@@ -185,6 +210,29 @@ def serve(
 
     config["mlock"] = mlock
 
+    # --- GPU configuration ---
+    # gpu=None means user did not pass either flag (auto mode: detect and use if found)
+    # gpu=True  means --gpu was passed explicitly
+    # gpu=False means --no-gpu was passed (force CPU only)
+    extra_args = list(ctx.args) if ctx.args else []
+    gpu_cfg_args: list[str] = []
+
+    use_gpu = gpu is not False  # True or None both allow GPU
+    if use_gpu:
+        detected_gpus = detect_all_gpus()
+        if detected_gpus:
+            if gpu_layers is not None:
+                # Manual override: build a minimal GPU config
+                from .gpu_detect import GPUConfig
+                gpu_cfg = GPUConfig(n_gpu_layers=gpu_layers, main_gpu=0)
+            else:
+                gpu_cfg = auto_configure_gpu()
+            gpu_cfg_args = get_gpu_server_args(gpu_cfg)
+        else:
+            detected_gpus = []
+    else:
+        detected_gpus = []
+
     # Display configuration
     click.echo(f"Starting llama.cpp server with preset '{preset}':")
     click.echo(f"  Host: {host}:{port}")
@@ -195,10 +243,28 @@ def serve(
     click.echo(f"  Memory lock: {'enabled' if config['mlock'] else 'disabled'}")
     click.echo(f"  NUMA: {'enabled' if config['numa'] else 'disabled'}")
 
-    if preset == "max-context":
-        click.echo("⚠️  Warning: Large context (32K) on CPU will be slow!")
+    # Print GPU info
+    if use_gpu and detected_gpus:
+        click.echo(format_gpu_info(detected_gpus))
+        if gpu_cfg_args:
+            n = gpu_cfg.n_gpu_layers
+            click.echo(f"  GPU layers: {n}")
+        # GPU is fast enough that mmap is fine; disable --no-mmap injection
+        # by adding --mmap explicitly so build_server_cmd skips injecting --no-mmap
+        if "--mmap" not in extra_args and "--no-mmap" not in extra_args:
+            extra_args.append("--mmap")
+        # NUMA binding is not needed when all work goes to the GPU
+        config["numa"] = False
+    else:
+        click.echo("  GPU: none detected (CPU-only mode)")
+
+    if preset == "max-context" and not (use_gpu and detected_gpus):
+        click.echo("Warning: Large context (32K) on CPU will be slow!")
     if model:
         click.echo(f"  Pre-loading model: {model}")
+
+    # Merge GPU args into extra_args (before user-supplied extra args)
+    final_extra_args = gpu_cfg_args + extra_args if gpu_cfg_args else (extra_args or None)
 
     run_proxy(
         host=host,
@@ -212,7 +278,7 @@ def serve(
         mlock=config["mlock"],
         numa=config["numa"],
         socket_id=socket_id,
-        extra_args=ctx.args or None,
+        extra_args=final_extra_args or None,
         startup_timeout=startup_timeout,
     )
 
@@ -344,6 +410,21 @@ def show(model: str) -> None:
     type=int,
     help="Maximum response tokens allowed (default: 32000).",
 )
+@click.option(
+    "--warm-models",
+    default=None,
+    help=(
+        "Comma-separated list of models to keep warm on all backends "
+        "(e.g., llama-3.3-70b-instruct,mistral-7b). "
+        "Sends a minimal 1-token request to preload each model and reduce cold-start latency."
+    ),
+)
+@click.option(
+    "--no-warm",
+    is_flag=True,
+    default=False,
+    help="Disable model warming even if --warm-models is set.",
+)
 def lb_proxy(
     host: str,
     port: int,
@@ -357,6 +438,8 @@ def lb_proxy(
     log_format: str,
     max_request_size: int,
     max_response_tokens: int,
+    warm_models: str | None,
+    no_warm: bool,
 ) -> None:
     """Start a multi-backend load balancer proxy.
 
@@ -386,6 +469,9 @@ def lb_proxy(
         # Use config file (auto-reloads on changes)
         llamacpp lb-proxy --config ./backends.json
 
+        # Keep popular models warm to reduce cold-start latency
+        llamacpp lb-proxy -b http://server:8000 --warm-models llama-3.3-70b-instruct,mistral-7b
+
     Config file format (JSON):
 
         {
@@ -403,6 +489,11 @@ def lb_proxy(
     if log_level is None:
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
+    # Parse comma-separated warm models
+    warm_model_list: list[str] | None = None
+    if warm_models:
+        warm_model_list = [m.strip() for m in warm_models.split(",") if m.strip()]
+
     run_lb_proxy(
         host=host,
         port=port,
@@ -416,6 +507,8 @@ def lb_proxy(
         log_format=log_format,
         max_request_size=max_request_size,
         max_response_tokens=max_response_tokens,
+        warm_models=warm_model_list,
+        no_warm=no_warm,
     )
 
 
@@ -486,6 +579,131 @@ def slot_serve(
         model=model,
         ctx_size=ctx_size,
     )
+
+
+@cli.command(name="serve-multi")
+@click.option(
+    "--model",
+    "-m",
+    multiple=True,
+    required=True,
+    help=(
+        "Model to serve, optionally with port: 'name:PORT' (e.g. llama3:8000). "
+        "Repeat for each model."
+    ),
+)
+@click.option(
+    "--proxy-port",
+    default=8080,
+    type=int,
+    show_default=True,
+    help="Port for the routing proxy (routes by requested model name).",
+)
+@click.option(
+    "--base-port",
+    default=8000,
+    type=int,
+    show_default=True,
+    help="Starting port for auto-assigned model backends.",
+)
+@click.option(
+    "--startup-timeout",
+    default=120.0,
+    type=float,
+    show_default=True,
+    help="Seconds to wait for each model server to become ready.",
+)
+@click.pass_context
+def serve_multi(
+    ctx: click.Context,
+    model: tuple[str, ...],
+    proxy_port: int,
+    base_port: int,
+    startup_timeout: float,
+) -> None:
+    """Serve multiple models on separate ports with a routing proxy.
+
+    Each --model argument starts a dedicated llama-server process.  The proxy
+    on --proxy-port routes incoming requests to the correct backend based on
+    the 'model' field in the request body.
+
+    Model port syntax:
+
+    \b
+        llamacpp serve-multi \\
+          --model llama-3.3-70b-instruct:8000 \\
+          --model qwen-2.5-7b:8001 \\
+          --proxy-port 8080
+
+    Omit the ':PORT' suffix to auto-assign ports starting from --base-port:
+
+    \b
+        llamacpp serve-multi --model llama3 --model qwen2
+    """
+    import signal
+    import sys
+
+    from .installer import ensure_llamacpp
+    from .multi_model_server import MultiModelServer
+
+    if not ensure_llamacpp():
+        return
+
+    server = MultiModelServer(base_port=base_port)
+
+    for spec in model:
+        if ":" in spec:
+            name, port_str = spec.rsplit(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                click.echo(
+                    f"Error: invalid port in '{spec}' — expected 'name:PORT'", err=True
+                )
+                raise SystemExit(1)
+            server.add_model(name, port=port)
+        else:
+            server.add_model(spec)
+
+    click.echo("Starting multi-model server:")
+    for inst in server.instances:
+        click.echo(f"  {inst.model} -> port {inst.port}")
+    click.echo(f"  Proxy -> port {proxy_port}")
+
+    try:
+        server.start_all(extra_args=ctx.args or None)
+    except Exception as exc:
+        click.echo(f"Error starting servers: {exc}", err=True)
+        server.stop_all()
+        raise SystemExit(1)
+
+    model_urls = server.get_model_urls()
+    if not model_urls:
+        click.echo("No models loaded successfully. Exiting.", err=True)
+        raise SystemExit(1)
+
+    click.echo("\nAll models ready. Routing proxy:")
+    for name, url in model_urls.items():
+        click.echo(f"  {name} -> {url}")
+
+    # Start the routing proxy
+    from .multi_model_proxy import run_multi_model_proxy
+
+    def _shutdown(signum, frame):  # noqa: ANN001
+        click.echo("\nShutting down...")
+        server.stop_all()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    try:
+        run_multi_model_proxy(
+            model_urls=model_urls,
+            proxy_port=proxy_port,
+        )
+    finally:
+        server.stop_all()
 
 
 @cli.group()
