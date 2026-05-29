@@ -456,6 +456,31 @@ class Backend:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_requests: int = 0
+    # Sliding window for t/s — (unix_timestamp, completion_tokens) tuples
+    # In-memory only; not persisted to disk.
+    _tps_window: list[tuple[float, int]] = field(default_factory=list)
+
+    def record_completion(self, completion_tokens: int) -> None:
+        """Record completion tokens and update totals for t/s calculation."""
+        now = time.time()
+        self._tps_window.append((now, completion_tokens))
+        # Prune entries older than 60 seconds
+        cutoff = now - 60.0
+        self._tps_window = [(t, n) for t, n in self._tps_window if t >= cutoff]
+        self.total_completion_tokens += completion_tokens
+
+    def tokens_per_second(self, window_secs: float = 60.0) -> float:
+        """Compute completion t/s over the last window_secs seconds."""
+        if not self._tps_window:
+            return 0.0
+        now = time.time()
+        cutoff = now - window_secs
+        recent = [(t, n) for t, n in self._tps_window if t >= cutoff]
+        if not recent:
+            return 0.0
+        timestamps = [t for t, _ in recent]
+        elapsed = max(now - timestamps[0], 1.0)  # at least 1s to avoid div/0
+        return sum(n for _, n in recent) / elapsed
 
     @property
     def url(self) -> str:
@@ -501,6 +526,8 @@ class ProxyState:
     discover_ports: list[int] = field(default_factory=lambda: [8000])  # Ports to probe
     rediscover_interval: float = 60.0  # Seconds between rediscovery sweeps
     rediscover_task: asyncio.Task | None = None
+    stats_file: Path | None = None  # Optional path for stats persistence
+    stats_persist_task: asyncio.Task | None = None
 
     def get_lock(self) -> asyncio.Lock:
         """Get or create the backends lock in the current event loop."""
@@ -904,6 +931,58 @@ async def _enforce_max_tokens(body_bytes: bytes, max_tokens: int) -> bytes:
     return body_bytes
 
 
+async def _save_stats(state: "ProxyState") -> None:
+    """Persist backend token totals to state.stats_file (JSON)."""
+    if not state.stats_file:
+        return
+    try:
+        async with state.get_lock():
+            backends_data = {
+                b.url: {
+                    "total_prompt_tokens": b.total_prompt_tokens,
+                    "total_completion_tokens": b.total_completion_tokens,
+                    "total_requests": b.total_requests,
+                }
+                for b in state.backends
+            }
+        payload = {
+            "saved_at": time.time(),
+            "backends": backends_data,
+        }
+        state.stats_file.parent.mkdir(parents=True, exist_ok=True)
+        state.stats_file.write_text(json.dumps(payload, indent=2))
+    except Exception as exc:
+        print(f"{_timestamp()} [lb-proxy] Error saving stats: {exc}", flush=True)
+
+
+def _load_stats(state: "ProxyState") -> None:
+    """Load persisted token totals from state.stats_file and merge into backends."""
+    if not state.stats_file or not state.stats_file.exists():
+        return
+    try:
+        data = json.loads(state.stats_file.read_text())
+        backends_saved = data.get("backends", {})
+        for backend in state.backends:
+            saved = backends_saved.get(backend.url)
+            if saved:
+                backend.total_prompt_tokens += saved.get("total_prompt_tokens", 0)
+                backend.total_completion_tokens += saved.get("total_completion_tokens", 0)
+                backend.total_requests += saved.get("total_requests", 0)
+        print(
+            f"{_timestamp()} [lb-proxy] Loaded stats from {state.stats_file}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"{_timestamp()} [lb-proxy] Error loading stats: {exc}", flush=True)
+
+
+async def _stats_persist_loop(state: "ProxyState") -> None:
+    """Background loop: persist stats every 30 seconds."""
+    while True:
+        await asyncio.sleep(30.0)
+        await _save_stats(state)
+
+
 async def _forward_request(request: Request, backend: Backend, state: ProxyState) -> Response:
     """Forward request to a backend and stream back the response."""
     url = f"{backend.url}{request.url.path}"
@@ -1003,7 +1082,7 @@ async def _forward_request(request: Request, backend: Backend, state: ProxyState
                             completion_tokens = last_usage.get("completion_tokens", 0)
 
                             backend.total_prompt_tokens += actual_prompt_tokens
-                            backend.total_completion_tokens += completion_tokens
+                            backend.record_completion(completion_tokens)
                             total_tokens = actual_prompt_tokens + completion_tokens
 
                             print(
@@ -1025,7 +1104,7 @@ async def _forward_request(request: Request, backend: Backend, state: ProxyState
                         completion_tokens = usage.get("completion_tokens", 0)
 
                         backend.total_prompt_tokens += actual_prompt_tokens
-                        backend.total_completion_tokens += completion_tokens
+                        backend.record_completion(completion_tokens)
                         total_tokens = actual_prompt_tokens + completion_tokens
 
                         print(
@@ -1145,6 +1224,14 @@ def create_lb_app(state: ProxyState) -> FastAPI:
                 flush=True,
             )
 
+        # Start stats persistence loop
+        if state.stats_file:
+            state.stats_persist_task = asyncio.create_task(_stats_persist_loop(state))
+            print(
+                f"{_timestamp()} [lb-proxy] Stats persistence every 30s to {state.stats_file}",
+                flush=True,
+            )
+
         # Start model warmer
         if state.model_warmer:
             if state.model_warmer.warm_on_startup:
@@ -1169,6 +1256,10 @@ def create_lb_app(state: ProxyState) -> FastAPI:
             queue_worker_task.cancel()
         if state.rediscover_task:
             state.rediscover_task.cancel()
+        if state.stats_persist_task:
+            state.stats_persist_task.cancel()
+        # Persist final stats before exit
+        await _save_stats(state)
         if state.model_warmer:
             state.model_warmer.stop()
 
@@ -1950,6 +2041,7 @@ curl http://localhost:8080/v1/chat/completions \\
                     "total_prompt_tokens": b.total_prompt_tokens,
                     "total_completion_tokens": b.total_completion_tokens,
                     "total_tokens": b.total_prompt_tokens + b.total_completion_tokens,
+                    "tps": round(b.tokens_per_second(), 2),
                 }
                 for b in state.backends
             ]
@@ -2038,6 +2130,10 @@ curl http://localhost:8080/v1/chat/completions \\
         .circuit-open { color: #f44336; font-size: 12px; }
         .circuit-closed { color: #4CAF50; font-size: 12px; }
         .circuit-half_open { color: #ff9800; font-size: 12px; }
+        .tps-high { color: #4CAF50; font-weight: bold; }
+        .tps-mid { color: #ff9800; font-weight: bold; }
+        .tps-low { color: #f44336; font-weight: bold; }
+        .tps-idle { color: #aaa; }
         .extra-stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -2110,11 +2206,12 @@ curl http://localhost:8080/v1/chat/completions \\
                 <th>Active</th>
                 <th>Total Requests</th>
                 <th>Total Tokens</th>
+                <th>t/s</th>
                 <th>Circuit</th>
             </tr>
         </thead>
         <tbody id="backends-tbody">
-            <tr><td colspan="6" style="text-align:center;color:#aaa">Waiting for data...</td></tr>
+            <tr><td colspan="7" style="text-align:center;color:#aaa">Waiting for data...</td></tr>
         </tbody>
     </table>
 
@@ -2175,12 +2272,16 @@ curl http://localhost:8080/v1/chat/completions \\
             var healthClass = b.healthy ? 'healthy' : 'unhealthy';
             var healthTxt = b.healthy ? 'Healthy' : 'Unhealthy';
             var circClass = 'circuit-' + (b.circuit_state || 'closed');
+            var tps = b.tps || 0;
+            var tpsClass = tps === 0 ? 'tps-idle' : (tps >= 10 ? 'tps-high' : (tps >= 3 ? 'tps-mid' : 'tps-low'));
+            var tpsTxt = tps === 0 ? '—' : tps.toFixed(1);
             return '<tr>' +
                 '<td><code>' + b.url + '</code></td>' +
                 '<td class="' + healthClass + '">' + healthTxt + '</td>' +
                 '<td>' + fmt(b.active_requests) + '</td>' +
                 '<td>' + fmt(b.total_requests) + '</td>' +
                 '<td>' + fmt(b.total_tokens) + '</td>' +
+                '<td class="' + tpsClass + '">' + tpsTxt + '</td>' +
                 '<td class="' + circClass + '">' + (b.circuit_state || 'closed') + '</td>' +
                 '</tr>';
         }).join('');
@@ -2302,6 +2403,7 @@ curl http://localhost:8080/v1/chat/completions \\
                                 "active_requests": b.active_requests,
                                 "total_requests": b.total_requests,
                                 "total_tokens": b.total_prompt_tokens + b.total_completion_tokens,
+                                "tps": round(b.tokens_per_second(), 2),
                                 "circuit_state": b.circuit_breaker.state.value,
                             }
                             for b in state.backends
@@ -2355,6 +2457,7 @@ def run_lb_proxy(
     request_log_file: str | None = None,
     request_log_failed_only: bool = False,
     request_log_max: int = 1000,
+    stats_file: str | None = None,
 ) -> None:
     """Start the multi-backend load balancer proxy."""
     import socket
@@ -2449,6 +2552,16 @@ def run_lb_proxy(
 
     # Configure structured logging
     configure_logging(log_level=log_level, log_format=log_format)
+
+    # Configure stats persistence
+    if stats_file is not None:
+        state.stats_file = Path(stats_file).expanduser().resolve()
+    else:
+        state.stats_file = get_base_dir() / "lb_stats.json"
+    print(
+        f"{_timestamp()} [lb-proxy] Stats persistence file: {state.stats_file}",
+        flush=True,
+    )
 
     # Load config file
     if config_file:
@@ -2559,6 +2672,9 @@ def run_lb_proxy(
 
         for subnet in subnets:
             discover_tasks.append(_discover_and_check(subnet))
+
+    # Load persisted stats into matching backends
+    _load_stats(state)
 
     # Initial health check for any pre-configured backends
     async def _initial_checks() -> None:

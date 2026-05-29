@@ -462,6 +462,14 @@ def show(model: str) -> None:
     type=int,
     help="Maximum number of requests to keep in the in-memory ring buffer (default: 1000).",
 )
+@click.option(
+    "--stats-file",
+    default=None,
+    help=(
+        "Path to JSON file for stats persistence across restarts "
+        "(default: ~/.llamacpp/lb_stats.json)."
+    ),
+)
 def lb_proxy(
     host: str,
     port: int,
@@ -482,6 +490,7 @@ def lb_proxy(
     request_log_file: str | None,
     request_log_failed_only: bool,
     request_log_max: int,
+    stats_file: str | None,
 ) -> None:
     """Start a multi-backend load balancer proxy.
 
@@ -570,6 +579,7 @@ def lb_proxy(
         request_log_file=request_log_file,
         request_log_failed_only=request_log_failed_only,
         request_log_max=request_log_max,
+        stats_file=stats_file,
     )
 
 
