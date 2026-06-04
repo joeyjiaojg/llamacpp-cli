@@ -101,6 +101,9 @@ def build_server_cmd(
     if not _has_flag(extra, "--no-mmap", "--mmap"):
         cmd += ["--no-mmap"]
 
+    if not _has_flag(extra, "--reasoning"):
+        cmd += ["--reasoning", "off"]
+
     # --kv-unified: unified KV cache shared across all slots.
     # Required for --cache-idle-slots (preserves KV cache of idle slots for reuse).
     # Also allows better memory utilisation in multi-slot setups.

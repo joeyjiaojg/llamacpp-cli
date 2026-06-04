@@ -13,7 +13,7 @@ DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker
 # ---------------------------------------------------------------------------
 # Defaults (all overridable on the command line)
 # ---------------------------------------------------------------------------
-MODEL_ARGS   ?=
+MODEL_ARGS   ?= --model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF
 SOCKET_ID    ?= 0
 PORT         ?= 8000
 SUBNET       ?= 192.168.1.0/24
@@ -44,13 +44,13 @@ help:
 	@echo "  BACKEND COMMANDS  (run on each backend machine)"
 	@echo "  ────────────────────────────────────────────────"
 	@echo "  make build-backend"
-	@echo "  make start-backend MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
+	@echo "  make start-backend MODEL_ARGS='--model Jackapan/gemma-4-E2B-it-Q4_K_M-GGUF'"
 	@echo "  make stop-backend"
 	@echo "  make restart-backend MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
 	@echo "  make logs-backend"
 	@echo ""
 	@echo "  Dual-socket shortcut (starts socket-0 on :8000 and socket-1 on :8001):"
-	@echo "  make start-backend-dual MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
+	@echo "  make start-backend-dual MODEL_ARGS='--model Jackapan/gemma-4-E2B-it-Q4_K_M-GGUF'"
 	@echo "  make start-backend-single MODEL_ARGS='--model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF'"
 	@echo "  make stop-backend-dual"
 	@echo ""
