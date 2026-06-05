@@ -13,7 +13,7 @@ DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker
 # ---------------------------------------------------------------------------
 # Defaults (all overridable on the command line)
 # ---------------------------------------------------------------------------
-MODEL_ARGS   ?= --model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF
+MODEL_ARGS   ?= --model jc-builds/Qwen3.5-9B-Q4_K_M-GGUF --ctx-size 131072
 SOCKET_ID    ?= 0
 PORT         ?= 8000
 SUBNET       ?= 192.168.1.0/24
